@@ -73,14 +73,21 @@ In the directory containing the binary, the example config, and the deploy asset
 ```bash
 cd ~/  # where goloom-wg-server (the binary) is
 cp goloom-wg-server.yaml.example goloom-wg-server.yaml
-nano goloom-wg-server.yaml   # replace REPLACE_ME_WITH_HEX_64 with `openssl rand -hex 32`
+# Default-конфиг работает без правок. Если порт `:9443` занят или хочешь
+# слушать только на loopback — отредактируй `admin.listen`.
 
 bash deploy/install.sh
 systemctl start goloom-wg-server
-journalctl -u goloom-wg-server -f
+journalctl -u goloom-wg-server -n 50
 ```
 
-If everything is fine, you'll see HTTPS panel listening on `:9443`.
+При первом запуске в логах будет сгенерированная пара логин/пароль:
+```
+ADMIN bootstrap credentials → username=admin  password=abc123def456...
+```
+Запиши пароль (он печатается один раз) и заходи на `https://<vps>:9443`.
+В панели сразу появится красный баннер с просьбой сменить — сделай через
+"⚙ Аккаунт".
 
 ## 5. Provision your first inbound
 

@@ -1,16 +1,18 @@
-# Compiled binaries (cross-OS, all flavors)
-goloom-wg-server
-goloom-wg-server.exe
-goloom-wg-client
-goloom-wg-client.exe
+# Compiled binaries — leading slash anchors pattern to repo root,
+# so we don't accidentally hide cmd/goloom-wg-server/ etc.
+/goloom-wg-server
+/goloom-wg-server.exe
+/goloom-wg-client
+/goloom-wg-client.exe
 
 # Build outputs
-build/
-dist/
+/build/
+/dist/
 
 # Local configs (per-deployment)
-goloom-wg-server.yaml
-goloom-wg-client.yaml
+/goloom-wg-server.yaml
+/goloom-wg-client.yaml
+admin.json
 
 # Logs
 *.log

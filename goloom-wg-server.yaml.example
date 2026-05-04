@@ -5,11 +5,12 @@ admin:
   # Where the HTTPS admin panel listens. 0.0.0.0:9443 by default.
   listen: "0.0.0.0:9443"
 
-  # Bearer token for the panel. Generate a fresh one:
-  #   openssl rand -hex 32
-  # Anyone with this token can create/delete inbounds and download
-  # connection strings, so keep it secret.
-  token: "REPLACE_ME_WITH_HEX_64"
+  # Login uses username + bcrypt-hashed password stored in admin.json
+  # next to this YAML. On first start the server generates a random
+  # password for username `admin` and prints it ONCE to journalctl —
+  # capture it from the log and immediately change via the dashboard.
+  # If the JSON file is lost, delete it and restart to regenerate.
+  # credentials_path: "/etc/goloom/admin.json"   # optional override
 
   tls:
     # If true, the server generates a self-signed cert at startup —

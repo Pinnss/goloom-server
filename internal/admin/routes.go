@@ -44,6 +44,7 @@ func wgInterfaceList(opts Options) []wgInterfaceInfo {
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
+	s.registerAuthRoutes(mux)
 	mux.HandleFunc("GET /static/style.css", s.handleCSS)
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /api/inbounds", s.handleListInbounds)

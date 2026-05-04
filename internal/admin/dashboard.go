@@ -42,13 +42,31 @@ pre{background:#000;padding:8px;border-radius:4px;font-size:11px;overflow-x:auto
 .field{margin:10px 0}
 .field label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
 .empty{text-align:center;color:var(--muted);padding:40px}
+.banner{background:#3a1f1f;border:1px solid #7a3838;color:#ffd2c4;padding:10px 14px;border-radius:6px;margin-bottom:16px;display:flex;align-items:center;gap:12px}
+.banner.hidden{display:none}
+.banner b{color:#fff}
+.account{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.account .user{font-family:monospace;color:var(--text)}
 `
 
 const dashboardHTML = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <title>goloom admin</title>
 <link rel="stylesheet" href="/static/style.css">
 </head><body>
-<h1>goloom <span class="badge">admin</span></h1>
+<h1>goloom <span class="badge">admin</span>
+  <span style="flex:1"></span>
+  <span class="account"><span class="user" id="curUser">…</span>
+    <button class="ghost" onclick="openAccount()">⚙ Аккаунт</button>
+    <button class="ghost" onclick="logout()">Выйти</button>
+  </span>
+</h1>
+
+<div id="defaultPwBanner" class="banner hidden">
+  ⚠ <span>Используется временный пароль по умолчанию. <b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.</span>
+  <span style="flex:1"></span>
+  <button onclick="openAccount()">Сменить пароль</button>
+</div>
+
 <div class="bar">
   <button onclick="openModal()">+ Создать inbound</button>
   <button class="ghost" onclick="refresh()">Обновить</button>
@@ -59,6 +77,18 @@ const dashboardHTML = `<!doctype html><html lang="ru"><head><meta charset="utf-8
   <summary>WG-интерфейсы на сервере</summary>
   <div id="wgList" style="margin-top:8px"></div>
 </details>
+
+<div id="accountModal" class="modal"><div class="body">
+<h2>Сменить пароль</h2>
+<div class="field"><label>Текущий пароль</label><input id="pwCurrent" type="password" autocomplete="current-password"></div>
+<div class="field"><label>Новый пароль (минимум 8 символов)</label><input id="pwNew" type="password" autocomplete="new-password"></div>
+<div class="field"><label>Подтверждение нового пароля</label><input id="pwConfirm" type="password" autocomplete="new-password"></div>
+<div id="pwErr" style="color:var(--danger);font-size:12px;min-height:16px"></div>
+<div class="actions">
+<button onclick="changePassword()">Сменить</button>
+<button class="ghost" onclick="closeAccount()">Отмена</button>
+</div>
+</div></div>
 
 <div id="modal" class="modal"><div class="body">
 <h2>Новый inbound</h2>
@@ -74,11 +104,12 @@ const dashboardHTML = `<!doctype html><html lang="ru"><head><meta charset="utf-8
 </div></div>
 
 <script>
-function token(){return document.cookie.replace(/(?:(?:^|.*;\s*)goloom_token\s*=\s*([^;]*).*$)|^.*$/,"$1")}
-function authHeaders(){var h={"Content-Type":"application/json"};var t=token();if(t)h.Authorization="Bearer "+t;return h}
+// Auth теперь cookie-based; fetch автоматически шлёт session cookie.
+function authHeaders(){return {"Content-Type":"application/json"}}
+function on401(r){if(r.status===401){location="/login";return true}return false}
 async function refresh(){
   var r=await fetch("/api/inbounds",{headers:authHeaders()});
-  if(r.status===401){location.reload();return}
+  if(on401(r))return;
   var list=await r.json();
   var el=document.getElementById("cards");
   if(!list||!list.length){el.innerHTML='<div class="empty">Пока пусто. Жми <b>+ Создать inbound</b> сверху.</div>';return}
@@ -86,7 +117,7 @@ async function refresh(){
 }
 function renderCard(s){
   var bytes=function(n){if(!n)return "0 B";var k=1024;if(n<k)return n+" B";if(n<k*k)return (n/k).toFixed(1)+" KB";if(n<k*k*k)return (n/k/k).toFixed(1)+" MB";return (n/k/k/k).toFixed(2)+" GB"};
-  var qr='/api/inbounds/'+s.id+'/qr.png?token='+encodeURIComponent(token());
+  var qr='/api/inbounds/'+s.id+'/qr.png';
   return '<div class="card">'+
     '<h2><span>'+escapeHtml(s.tag)+'</span><span class="phase '+s.phase+'">'+s.phase+'</span></h2>'+
     '<div class="row"><span>Meeting</span><b style="word-break:break-all;text-align:right">'+escapeHtml(short(s.meeting))+'</b></div>'+
@@ -109,6 +140,34 @@ function short(u){return u.length>50?u.slice(0,47)+'...':u}
 function escapeHtml(s){return (s||'').replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]})}
 function openModal(){document.getElementById("modal").classList.add("open")}
 function closeModal(){document.getElementById("modal").classList.remove("open")}
+function openAccount(){
+  document.getElementById("accountModal").classList.add("open");
+  document.getElementById("pwErr").textContent="";
+  document.getElementById("pwCurrent").value="";
+  document.getElementById("pwNew").value="";
+  document.getElementById("pwConfirm").value="";
+}
+function closeAccount(){document.getElementById("accountModal").classList.remove("open")}
+async function logout(){await fetch("/logout",{method:"POST"});location="/login"}
+async function changePassword(){
+  var err=document.getElementById("pwErr");err.textContent="";
+  var cur=document.getElementById("pwCurrent").value;
+  var nw=document.getElementById("pwNew").value;
+  var cf=document.getElementById("pwConfirm").value;
+  if(nw.length<8){err.textContent="Новый пароль слишком короткий (8+ символов)";return}
+  if(nw!==cf){err.textContent="Пароли не совпадают";return}
+  var r=await fetch("/api/admin/password",{method:"POST",headers:authHeaders(),
+    body:JSON.stringify({current:cur,new:nw})});
+  if(r.ok){closeAccount();refreshAdmin();alert("Пароль обновлён");return}
+  err.textContent=await r.text();
+}
+async function refreshAdmin(){
+  var r=await fetch("/api/admin/state",{headers:authHeaders()});
+  if(on401(r))return;
+  var st=await r.json();
+  document.getElementById("curUser").textContent=st.username||"";
+  document.getElementById("defaultPwBanner").classList.toggle("hidden",!st.is_default_password);
+}
 document.getElementById("autoProvision").addEventListener("change",function(e){
   document.getElementById("endpointField").style.display=e.target.checked?"none":"block";
 });
@@ -140,7 +199,7 @@ async function copyConn(id){
   alert("Connection string:\n\n"+s);
 }
 function downloadConf(id){
-  location="/api/inbounds/"+id+"/client.conf?token="+encodeURIComponent(token());
+  location="/api/inbounds/"+id+"/client.conf";
 }
 document.addEventListener("click",function(e){
   var b=e.target.closest("button[data-act]");
@@ -151,16 +210,6 @@ document.addEventListener("click",function(e){
   else if(act==="toggle")toggleInbound(id);
   else if(act==="delete")deleteInbound(id);
 });
-// If URL has ?token=... persist as cookie so subsequent fetches work, then strip from URL.
-(function(){
-  var url=new URL(location.href);
-  var t=url.searchParams.get("token");
-  if(t){
-    document.cookie="goloom_token="+t+"; path=/; max-age=86400; samesite=strict; secure";
-    url.searchParams.delete("token");
-    history.replaceState({},"",url.toString());
-  }
-})();
 // Pull history for each visible card and render TX (orange) + RX (green)
 // rate sparklines. Rate = byte delta per second, normalised to the
 // max within the window so visual amplitude stays readable when the
@@ -208,10 +257,11 @@ async function refreshWG(){
     }).join('')+'</table>';
 }
 
+refreshAdmin();
 refresh();
 refreshWG();
 refreshSparks();
-setInterval(function(){refresh();refreshWG();},5000);
+setInterval(function(){refresh();refreshWG();refreshAdmin();},5000);
 setInterval(refreshSparks,2000);
 </script>
 </body></html>`

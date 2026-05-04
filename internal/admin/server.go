@@ -2,27 +2,33 @@
 //
 // Endpoints:
 //
-//	GET  /                              dashboard HTML
-//	GET  /static/style.css              styling
-//	GET  /api/inbounds                  list (JSON)
-//	POST /api/inbounds                  create (provisions WG iface, joins meeting)
-//	DELETE /api/inbounds/{id}           remove (tears down WG iface)
-//	POST /api/inbounds/{id}/toggle      pause/resume
-//	GET  /api/inbounds/{id}/client.conf wg client config
-//	GET  /api/inbounds/{id}/connstr     goloom:// connection string
-//	GET  /api/inbounds/{id}/qr.png      QR PNG of the connection string
+//	GET    /                                dashboard HTML
+//	GET    /static/style.css                styling
+//	GET    /login                           login form
+//	POST   /login                           username+password → session cookie
+//	POST   /logout                          revoke session cookie
+//	GET    /api/admin/state                 { username, is_default_password }
+//	POST   /api/admin/password              change password (current+new)
+//	GET    /api/inbounds                    list (JSON)
+//	POST   /api/inbounds                    create
+//	DELETE /api/inbounds/{id}               remove
+//	POST   /api/inbounds/{id}/toggle        pause/resume
+//	GET    /api/inbounds/{id}/client.conf   wg client config
+//	GET    /api/inbounds/{id}/connstr       goloom:// connection string
+//	GET    /api/inbounds/{id}/qr.png        QR PNG of the connection string
+//	GET    /api/inbounds/{id}/history       per-inbound traffic samples
+//	GET    /api/system/wg-interfaces        live wg interface list
 //
-// Auth is a single bearer token from the YAML; all routes require it
-// (sent via Authorization header or ?token= query param). Listening on
-// 127.0.0.1 by default — operators expose via SSH tunnel or reverse proxy.
+// Auth is username + password (bcrypt-hashed) stored in a JSON file
+// alongside the YAML config. On first start a random "admin" password
+// is generated and printed to the log; the operator changes it via the
+// dashboard. Sessions are in-memory (revoked on server restart).
 package admin
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -34,25 +40,26 @@ import (
 
 type Options struct {
 	Listen         string
-	Token          string
+	Credentials    *CredentialStore
 	TLSCert        string
 	TLSKey         string
 	AutoSelfSigned bool
 	Manager        *inbound.Manager
-	Provisioner    *wgprovision.Provisioner // optional; nil = no auto-provisioning, only manual inbounds
+	Provisioner    *wgprovision.Provisioner
 	Logger         *log.Logger
 
-	// PublicEndpointHint is used when generating client WG configs to
-	// fill in the [Peer] Endpoint. For the goloom architecture this is
-	// always "127.0.0.1:<port>" because the user runs the joiner locally,
-	// but a future direct-WG mode would use the VPS's public IP.
+	// PublicEndpointHint fills in [Peer] Endpoint when generating
+	// client wg-quick configs. For the goloom architecture this is
+	// always loopback because the user runs the joiner locally; a
+	// future direct-WG mode would use the VPS's public IP here.
 	PublicEndpointHint string
 }
 
 type Server struct {
-	opts    Options
-	srv     *http.Server
-	tlsCfg  *tls.Config
+	opts     Options
+	srv      *http.Server
+	tlsCfg   *tls.Config
+	sessions *sessionStore
 }
 
 func New(opts Options) (*Server, error) {
@@ -61,6 +68,9 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.Manager == nil {
 		return nil, errors.New("admin: Manager required")
+	}
+	if opts.Credentials == nil {
+		return nil, errors.New("admin: Credentials required")
 	}
 	if opts.Logger == nil {
 		opts.Logger = log.Default()
@@ -75,7 +85,11 @@ func New(opts Options) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	s := &Server{opts: opts, tlsCfg: tlsCfg}
+	s := &Server{
+		opts:     opts,
+		tlsCfg:   tlsCfg,
+		sessions: newSessionStore(),
+	}
 	s.registerRoutes(mux)
 
 	s.srv = &http.Server{
@@ -113,57 +127,44 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
+// authMiddleware gatekeeps everything except the unauthenticated
+// surfaces (login form + its CSS + favicon). API endpoints get a 401
+// JSON-style response so client JS can show an inline error; HTML
+// routes get a 303 redirect to the login page.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.opts.Token == "" {
+		if isPublicPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		token := extractToken(r)
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.opts.Token)) != 1 {
-			if r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") {
-				renderLogin(w)
+		if _, ok := s.currentUser(r); !ok {
+			if isAPIPath(r.URL.Path) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func extractToken(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		return strings.TrimPrefix(h, "Bearer ")
+func (s *Server) currentUser(r *http.Request) (string, bool) {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return "", false
 	}
-	if c, err := r.Cookie("goloom_token"); err == nil {
-		return c.Value
+	user, err := s.sessions.Lookup(c.Value)
+	if err != nil {
+		return "", false
 	}
-	return r.URL.Query().Get("token")
+	return user, true
 }
 
-func renderLogin(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusUnauthorized)
-	fmt.Fprint(w, `<!doctype html><html><head><meta charset="utf-8"><title>goloom admin</title>
-<style>body{font-family:system-ui;background:#111;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-form{background:#1a1a1a;padding:24px;border-radius:8px;min-width:300px}
-h1{margin:0 0 16px;font-size:18px}
-input{width:100%;padding:8px;background:#222;border:1px solid #333;color:#eee;border-radius:4px;font-family:monospace}
-button{margin-top:12px;width:100%;padding:8px;background:#3a8;color:#fff;border:0;border-radius:4px;cursor:pointer}
-</style></head><body>
-<form method="GET" action="/">
-<h1>goloom admin</h1>
-<input type="password" name="token" placeholder="bearer token" autofocus>
-<button>Войти</button>
-</form>
-<script>
-document.querySelector('form').addEventListener('submit',function(e){
-  e.preventDefault();
-  var t=document.querySelector('input[name=token]').value;
-  document.cookie='goloom_token='+t+'; path=/; max-age=86400; samesite=strict';
-  location='/';
-});
-</script>
-</body></html>`)
+func isPublicPath(p string) bool {
+	return p == "/login" || p == "/static/style.css" || p == "/favicon.ico"
+}
+
+func isAPIPath(p string) bool {
+	return strings.HasPrefix(p, "/api/")
 }

@@ -7,7 +7,6 @@ require github.com/google/uuid v1.6.0
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/hashicorp/yamux v0.1.2
-	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/webrtc/v4 v4.2.12
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -44,9 +43,7 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
-	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )
