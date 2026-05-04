@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
 
 // Server accepts yamux streams from the tunnel and dials the requested

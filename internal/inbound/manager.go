@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/wgrelay"
+	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
 // Manager supervises a set of Runners, retrying failed ones with backoff

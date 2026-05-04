@@ -10,8 +10,8 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
-	mediastubs "github.com/Sv9toslavPinigin/goloom-server/internal/media"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
+	mediastubs "github.com/Pinnss/goloom-server/internal/media"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
 
 const HandshakeInterval = 500 * time.Millisecond

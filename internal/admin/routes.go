@@ -12,9 +12,9 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/connstr"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/inbound"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/wgprovision"
+	"github.com/Pinnss/goloom-server/internal/connstr"
+	"github.com/Pinnss/goloom-server/internal/inbound"
+	"github.com/Pinnss/goloom-server/internal/wgprovision"
 )
 
 func wgInterfaceList(opts Options) []wgInterfaceInfo {

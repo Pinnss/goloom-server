@@ -65,7 +65,7 @@ Output: `build/ios/Goloom.xcframework`. Drag into your Xcode project (Frameworks
 
 ## Reference clients
 
-The reference Android client lives in a separate repository — see [Sv9toslavPinigin/goloom-android](https://github.com/Sv9toslavPinigin/goloom-android) for a full Compose UI, profile import/export, per-app split tunnel, log viewer, and auto-reconnect.
+The reference Android client lives in a separate repository — see [Pinnss/goloom-android](https://github.com/Pinnss/goloom-android) for a full Compose UI, profile import/export, per-app split tunnel, log viewer, and auto-reconnect.
 
 iOS reference client TBD.
 

@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"

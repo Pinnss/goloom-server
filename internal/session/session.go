@@ -14,9 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/api"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/goloom"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/peer"
+	"github.com/Pinnss/goloom-server/internal/api"
+	"github.com/Pinnss/goloom-server/internal/goloom"
+	"github.com/Pinnss/goloom-server/internal/peer"
 )
 
 // Session holds everything the test phases need after connect.

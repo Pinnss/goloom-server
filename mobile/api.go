@@ -39,12 +39,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/connstr"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/identity"
-	mediastubs "github.com/Sv9toslavPinigin/goloom-server/internal/media"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/session"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/wgrelay"
+	"github.com/Pinnss/goloom-server/internal/connstr"
+	"github.com/Pinnss/goloom-server/internal/identity"
+	mediastubs "github.com/Pinnss/goloom-server/internal/media"
+	"github.com/Pinnss/goloom-server/internal/session"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
 // SocketProtector lets the native side mark sockets as bypass-VPN.

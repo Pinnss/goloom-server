@@ -1,4 +1,4 @@
-module github.com/Sv9toslavPinigin/goloom-server
+module github.com/Pinnss/goloom-server
 
 go 1.25.5
 

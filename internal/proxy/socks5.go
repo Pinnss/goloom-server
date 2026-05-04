@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
 
 // SOCKS5 server that listens locally and forwards connections through the

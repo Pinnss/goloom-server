@@ -40,7 +40,7 @@ Reply path is symmetric.
 
 ## Why this configuration
 
-- **Userspace WG on the client, kernel WG on the server**: clients (especially Android) can't reliably load kernel modules or even rely on `wireguard-android`'s native binding for arbitrary package names — see HANDOFF lessons in the [Android repo](https://github.com/Sv9toslavPinigin/goloom-android). The userspace implementation embedded in the gomobile `.aar` works on every Android since 8.0 with no permissions beyond `BIND_VPN_SERVICE`.
+- **Userspace WG on the client, kernel WG on the server**: clients (especially Android) can't reliably load kernel modules or even rely on `wireguard-android`'s native binding for arbitrary package names — see HANDOFF lessons in the [Android repo](https://github.com/Pinnss/goloom-android). The userspace implementation embedded in the gomobile `.aar` works on every Android since 8.0 with no permissions beyond `BIND_VPN_SERVICE`.
 - **WG endpoint = `127.0.0.1`**: WG packets never leave the device naked; they always go via the Goloom relay which wraps them in WebRTC. The "endpoint" in the WG config is therefore loopback by design.
 - **One inbound = one wg interface**: lets the admin panel deactivate / regenerate keys without disturbing other clients.
 
@@ -69,6 +69,6 @@ So scanning a single QR is enough — no separate `.conf` import.
 ## Source of truth
 
 - Go side: [`internal/connstr/connstr.go`](../internal/connstr/connstr.go)
-- Kotlin side: [ConnStr.kt](https://github.com/Sv9toslavPinigin/goloom-android/blob/main/app/src/main/java/app/goloom/client/data/ConnStr.kt)
+- Kotlin side: [ConnStr.kt](https://github.com/Pinnss/goloom-android/blob/main/app/src/main/java/app/goloom/client/data/ConnStr.kt)
 
 Both must move in lockstep — change the Go struct → bump a minor version → update Kotlin parser before any new field becomes mandatory.

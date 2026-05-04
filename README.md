@@ -9,7 +9,7 @@ This repository hosts the **server** (the relay running on a VPS) and the **mobi
 | Server | [`cmd/goloom-wg-server`](cmd/goloom-wg-server) | Long-running daemon on a VPS. Joins Telemost meetings, terminates Goloom-tunneled WireGuard packets, hands them to the kernel WG stack, NATs to the internet. |
 | Desktop client | [`cmd/goloom-wg-client`](cmd/goloom-wg-client) | Reference CLI client for Linux/Windows/macOS. Uses kernel/userspace WireGuard. |
 | Mobile SDK | [`mobile`](mobile) | Gomobile bridge — produces `goloom.aar` (Android) and `Goloom.xcframework` (iOS). Embeds a pure-Go userspace WireGuard so the mobile app does not need `wireguard-android` / `WireGuardKit`. |
-| Reference Android app | [Sv9toslavPinigin/goloom-android](https://github.com/Sv9toslavPinigin/goloom-android) | Full Compose UI — profile import/export, per-app split tunnel, logs, auto-reconnect on network change. |
+| Reference Android app | [Pinnss/goloom-android](https://github.com/Pinnss/goloom-android) | Full Compose UI — profile import/export, per-app split tunnel, logs, auto-reconnect on network change. |
 
 ## Quick start
 
@@ -18,7 +18,7 @@ This repository hosts the **server** (the relay running on a VPS) and the **mobi
 See [`docs/INSTALL.md`](docs/INSTALL.md) for the full step-by-step. Short version:
 
 ```bash
-git clone https://github.com/Sv9toslavPinigin/goloom-server.git
+git clone https://github.com/Pinnss/goloom-server.git
 cd goloom-server
 sudo bash deploy/install.sh
 ```

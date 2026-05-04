@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/inbound"
-	"github.com/Sv9toslavPinigin/goloom-server/internal/wgprovision"
+	"github.com/Pinnss/goloom-server/internal/inbound"
+	"github.com/Pinnss/goloom-server/internal/wgprovision"
 )
 
 type Options struct {

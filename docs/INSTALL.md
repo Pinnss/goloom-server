@@ -14,7 +14,7 @@ End-to-end setup of `goloom-wg-server` on a fresh Ubuntu/Debian VPS.
 On any machine with Go 1.22+:
 
 ```bash
-git clone https://github.com/Sv9toslavPinigin/goloom-server.git
+git clone https://github.com/Pinnss/goloom-server.git
 cd goloom-server
 go build -o goloom-wg-server ./cmd/goloom-wg-server
 ```

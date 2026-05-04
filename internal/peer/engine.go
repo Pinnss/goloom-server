@@ -3,7 +3,7 @@ package peer
 import (
 	"github.com/pion/webrtc/v4"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/goloom"
+	"github.com/Pinnss/goloom-server/internal/goloom"
 )
 
 // BuildAPI constructs a Pion webrtc.API with a minimal MediaEngine matching

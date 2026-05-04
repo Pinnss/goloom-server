@@ -27,7 +27,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/Sv9toslavPinigin/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
 
 // ErrPeerRehandshake is signalled when the data tunnel observes a
