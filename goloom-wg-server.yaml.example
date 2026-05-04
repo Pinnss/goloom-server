@@ -1,0 +1,41 @@
+# goloom-wg-server v2 — multi-inbound + admin panel.
+# Copy to goloom-wg-server.yaml and adjust before running.
+
+admin:
+  # Where the HTTPS admin panel listens. 0.0.0.0:9443 by default.
+  listen: "0.0.0.0:9443"
+
+  # Bearer token for the panel. Generate a fresh one:
+  #   openssl rand -hex 32
+  # Anyone with this token can create/delete inbounds and download
+  # connection strings, so keep it secret.
+  token: "REPLACE_ME_WITH_HEX_64"
+
+  tls:
+    # If true, the server generates a self-signed cert at startup —
+    # convenient for personal use but browsers will warn. Set false and
+    # provide cert/key when you have a real TLS cert (e.g. from Let's
+    # Encrypt via certbot).
+    auto_self_signed: true
+    # cert: "/etc/goloom/cert.pem"
+    # key:  "/etc/goloom/key.pem"
+
+network:
+  # Empty = auto-detect via `ip route get 8.8.8.8` and use whatever
+  # interface is the default route (eth0 / ens3 / enp1s0 / ...).
+  external_iface: ""
+
+  # Each inbound provisions a /24 from this /16 (10.66.0.0/24,
+  # 10.66.1.0/24, ...). Keep at least the first /24 for wg0 (admin's
+  # bootstrap link, if any).
+  wg_subnet_base: "10.66.0.0/16"
+
+  # First UDP port; each inbound bumps by one (51820, 51821, ...).
+  wg_port_base: 51820
+
+# Auto-managed by the admin panel — every CRUD operation rewrites this
+# list. You can also pre-seed inbounds by hand while the service is
+# stopped, then bring it up.
+inbounds: []
+
+log_level: "info"

@@ -1,0 +1,21 @@
+[Unit]
+Description=goloom WireGuard transport-proxy server
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+Requires=wg-quick@wg0.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/goloom
+ExecStart=/opt/goloom/goloom-wg-server -config /opt/goloom/goloom-wg-server.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=goloom-wg-server
+
+[Install]
+WantedBy=multi-user.target
