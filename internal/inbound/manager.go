@@ -220,7 +220,19 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 
 	backoff := 5 * time.Second
 	for {
-		err := e.runner.Run(ctx)
+		// Каждая попытка получает свой derived ctx — так watchdog может
+		// прибить конкретно этот Run без того, чтобы убить весь supervise.
+		runCtx, runCancel := context.WithCancel(ctx)
+
+		// Watchdog следит за свежестью rx-трафика: если в фазе relaying
+		// за 2 минуты не пришло ни одного нового пакета — Telemost-сессия
+		// явно сдохла (ICE failed, peer disconnected, etc.) даже если
+		// внутренний runner этого ещё не заметил. Cancel'ом forсим выход
+		// из creator.Run и попадаем во второй виток retry-цикла.
+		go m.watchdog(runCtx, runCancel, e.runner)
+
+		err := e.runner.Run(runCtx)
+		runCancel()
 
 		if ctx.Err() != nil {
 			return
@@ -256,6 +268,69 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 		}
 		if !errors.Is(err, wgrelay.ErrPeerRehandshake) && backoff < 60*time.Second {
 			backoff *= 2
+		}
+	}
+}
+
+// watchdog следит за свежестью rx-трафика на активном inbound. Запускается
+// внутри [supervise] и завершается либо вместе с runCtx, либо принудительно
+// — когда замечает stall и сам же дёргает cancel.
+//
+// Алгоритм: раз в 30 сек смотрим rx-байты. Пока inbound не вышел в фазу
+// `relaying`, baseline сбрасывается (handshake-таймауты и empty-room
+// retry'и обрабатывает сам supervise). После того как пошёл реальный
+// трафик — если за rxStallTimeout (2 мин) счётчик не сдвинулся, считаем
+// сессию мёртвой и cancel'ит local ctx.
+//
+// 2 минуты выбраны так: WG persistent-keepalive раз в 25 сек, плюс
+// несколько потерянных пакетов = ~75 сек. С запасом 120 сек гарантирует,
+// что мы не дёрнем здоровое-но-тихое соединение, но всё-таки реагируем
+// быстрее, чем за 15 часов простоя как было до фикса.
+func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+	const (
+		tick           = 30 * time.Second
+		rxStallTimeout = 2 * time.Minute
+	)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var (
+		lastRx     uint64
+		lastChange = time.Now()
+		wasActive  bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st := r.Status()
+			if st.Phase != "relaying" {
+				// Ещё не дошли до boilerplate-стадии или уже вышли —
+				// сбрасываем baseline, чтобы не сорваться при следующем
+				// переходе.
+				lastRx = 0
+				lastChange = time.Now()
+				wasActive = false
+				continue
+			}
+			if !wasActive {
+				wasActive = true
+				lastRx = st.RxBytes
+				lastChange = time.Now()
+				continue
+			}
+			if st.RxBytes != lastRx {
+				lastRx = st.RxBytes
+				lastChange = time.Now()
+				continue
+			}
+			if time.Since(lastChange) > rxStallTimeout {
+				m.logger.Printf("inbound %s: no rx for %s while phase=relaying — forcing reconnect",
+					r.Spec.Tag, rxStallTimeout)
+				cancel()
+				return
+			}
 		}
 	}
 }
