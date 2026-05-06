@@ -60,18 +60,29 @@ func supervise(ctx context.Context, cfg *Config, lg *log.Logger) {
 			lg.Printf("peer rehandshake — reconnecting in 1s (letting SFU release old peer slot)")
 			retryAfter = 1 * time.Second
 			backoff = 5 * time.Second
+		} else if errors.Is(err, wgrelay.ErrRxStall) {
+			// Watchdog detected media-track shaping. Same fast-retry
+			// strategy as a peer-rehandshake — old SFU session needs a
+			// brief moment to wind down before we rejoin, otherwise we
+			// can collide with our zombie subscription.
+			lg.Printf("rx stall — Telemost SFU likely shaped our tracks; reconnecting in 1s")
+			retryAfter = 1 * time.Second
+			backoff = 5 * time.Second
 		} else if err != nil {
 			lg.Printf("session ended: %v — retrying in %s", err, backoff)
 		} else {
 			lg.Printf("session ended cleanly — retrying in %s", backoff)
 		}
 
+		fastRetry := errors.Is(err, wgrelay.ErrPeerRehandshake) ||
+			errors.Is(err, wgrelay.ErrRxStall)
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(retryAfter):
 		}
-		if !errors.Is(err, wgrelay.ErrPeerRehandshake) && backoff < 60*time.Second {
+		if !fastRetry && backoff < 60*time.Second {
 			backoff *= 2
 		}
 	}
@@ -221,12 +232,28 @@ func run(ctx context.Context, cfg *Config, lg *log.Logger, rm *tun.RouteManager)
 	dt := wgrelay.New(cameraSender, merged, lg)
 	joiner := wgrelay.NewJoiner(cfg.ListenAddr, dt, lg)
 
-	go dt.Run(ctx)
+	// runCtx — derived от outer ctx, чтобы watchdog мог принудительно
+	// прибить именно текущую попытку tunnel'я, не убивая весь supervise().
+	// При нормальном завершении joiner.Run возвращается, defer cancel
+	// гасит и watchdog, и dt.Run.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	go dt.Run(runCtx)
+	go wgrelay.RunRxStallWatchdogDefault(runCtx, runCancel, dt, lg)
 
 	lg.Printf("✓ goloom-wg-client ready — now activate your WireGuard tunnel")
 	lg.Printf("  WG should point Endpoint at %s", cfg.ListenAddr)
 
-	err = joiner.Run(ctx)
+	err = joiner.Run(runCtx)
+
+	// Watchdog мог сорваться раньше joiner.Run, тогда runCtx уже cancelled
+	// и joiner вернёт ctx.Err(). Превращаем это в специфичный ErrRxStall
+	// чтобы supervise() выбрал быстрый retry (а не общий exponential
+	// backoff как при unknown crash).
+	if dt.WasRxStalled() {
+		return wgrelay.ErrRxStall
+	}
 	if errors.Is(err, wgrelay.ErrPeerRehandshake) {
 		return err // surface up to supervise() for fast retry
 	}
@@ -235,6 +262,7 @@ func run(ctx context.Context, cfg *Config, lg *log.Logger, rm *tun.RouteManager)
 	}
 	return nil
 }
+
 
 func resolveTelemostIPs(meetingURL string) ([]net.IP, error) {
 	var allIPs []net.IP

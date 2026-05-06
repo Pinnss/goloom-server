@@ -277,6 +277,14 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 
 	go dt.Run(ctx)
 	go c.statsLoop(ctx, joiner)
+	// rx-stall watchdog. Симметрия серверному (manager.go::watchdog) и
+	// клиенту (cmd/goloom-wg-client/main.go::run): при шейпинге
+	// media-tracks Telemost SFU control-channel остаётся живым, а
+	// WG-payload через video-track замирает. Watchdog ловит это и
+	// форсит cancel(ctx) → joiner.Run возвращается → финализирующая
+	// горутина видит dt.WasRxStalled() и пишет ErrRxStall в done →
+	// supervise() делает быстрый retry.
+	go wgrelay.RunRxStallWatchdogDefault(ctx, cancel, dt, c.logger)
 
 	// joiner.Run blocks indefinitely. Run его в горутине и сообщи о
 	// результате через c.sessionDone — supervisor (или сам Connect)
@@ -298,6 +306,12 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	}
 	go func() {
 		joinErr := joiner.Run(ctx)
+		// Если watchdog успел сорваться раньше joiner — заменяем
+		// generic ctx-cancel ошибку на специфичный ErrRxStall, чтобы
+		// supervise() мог выбрать fast-retry стратегию.
+		if dt.WasRxStalled() {
+			joinErr = wgrelay.ErrRxStall
+		}
 		// Закрываем ресурсы здесь, потому что runSession уже вернулся
 		// (defer'ы на уровне runSession неприменимы — иначе они
 		// сработают сразу после ConnectResult, до joiner.Run).
@@ -400,18 +414,30 @@ func (c *Client) supervise(parentCtx context.Context) {
 			c.logger.Printf("supervisor: peer rehandshake — reconnecting in 1s (SFU cleanup)")
 			retryAfter = 1 * time.Second
 			backoff = 5 * time.Second
+		} else if errors.Is(err, wgrelay.ErrRxStall) {
+			// Watchdog поймал шейпинг media-tracks. Та же fast-retry
+			// стратегия что у peer-rehandshake — старая SFU сессия
+			// нуждается в небольшой паузе чтобы освободить наш
+			// participant slot, иначе новая сессия столкнётся с
+			// зомби-подпиской.
+			c.logger.Printf("supervisor: rx stall — Telemost SFU shaped tracks; reconnecting in 1s")
+			retryAfter = 1 * time.Second
+			backoff = 5 * time.Second
 		} else if err != nil {
 			c.logger.Printf("supervisor: session ended: %v — retrying in %s", err, backoff)
 		} else {
 			c.logger.Printf("supervisor: session ended cleanly — retrying in %s", backoff)
 		}
 
+		fastRetry := errors.Is(err, wgrelay.ErrPeerRehandshake) ||
+			errors.Is(err, wgrelay.ErrRxStall)
+
 		select {
 		case <-parentCtx.Done():
 			return
 		case <-time.After(retryAfter):
 		}
-		if !errors.Is(err, wgrelay.ErrPeerRehandshake) && backoff < 60*time.Second {
+		if !fastRetry && backoff < 60*time.Second {
 			backoff *= 2
 		}
 	}

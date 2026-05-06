@@ -26,6 +26,8 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
@@ -35,6 +37,14 @@ import (
 // meaning the peer restarted and wants to renegotiate. Joiners and
 // creators surface this so the supervisor restarts the whole stack.
 var ErrPeerRehandshake = errors.New("wgrelay: peer initiated re-handshake")
+
+// ErrRxStall is returned from the supervised run() when the rx-stall
+// watchdog has fired — i.e. the tunnel completed handshake and was
+// active, but no WG payload arrived for the configured timeout
+// (default 2 min). Usually means Telemost SFU started shaping or
+// dropped our media tracks while keeping the control channel alive.
+// supervise() treats this like ErrPeerRehandshake — fast retry.
+var ErrRxStall = errors.New("wgrelay: rx stalled after handshake")
 
 // FlagWGData is set on tunnel frames carrying a WireGuard datagram.
 // We reuse FlagTest's bit (0x01) since the test path is unused in
@@ -56,6 +66,24 @@ type DataTunnel struct {
 	closed       bool
 	closeCh      chan struct{}
 	rehandshake  bool // set when we exit because the peer wanted to renegotiate
+
+	// Atomic throughput counters — read by the supervisor's rx-stall
+	// watchdog (clients) and by Status() for live UI/admin metrics.
+	// Bytes only count WG-flagged payloads, not handshake/handshakeAck.
+	rxBytes atomic.Int64
+	txBytes atomic.Int64
+
+	// Set the first time a WG payload arrives. The watchdog ignores
+	// rx-stall before this point — pre-handshake the channel is
+	// expected to be quiet, and treating that as a stall would cause
+	// an immediate reconnect loop.
+	gotFirstRx atomic.Bool
+
+	// Set by the rx-stall watchdog when it fires. The supervised
+	// caller checks this after the joiner exits to surface
+	// ErrRxStall (vs a generic ctx-cancel) so the upstream retry
+	// strategy can decide how aggressive to be.
+	rxStalled atomic.Bool
 }
 
 func New(sender *tunnel.Sender, frames <-chan tunnel.ReceivedFrame, lg *log.Logger) *DataTunnel {
@@ -96,6 +124,8 @@ func (t *DataTunnel) Run(ctx context.Context) {
 			if !f.Flags.Has(FlagWGData) {
 				continue
 			}
+			t.rxBytes.Add(int64(len(f.Payload)))
+			t.gotFirstRx.Store(true)
 			t.mu.RLock()
 			cb := t.onData
 			t.mu.RUnlock()
@@ -123,7 +153,132 @@ func (t *DataTunnel) Send(data []byte) error {
 		return errors.New("wgrelay: tunnel closed")
 	}
 	_, err := t.sender.Send(FlagWGData, data)
+	if err == nil {
+		// Counted on best-effort: actual TX happens later in Sender's
+		// loop, but for stall-detection we care about queued bytes
+		// since that means the upper layer is trying to push data.
+		t.txBytes.Add(int64(len(data)))
+	}
 	return err
+}
+
+// Stats returns running rx/tx byte counters and whether the tunnel has
+// ever received a WG payload (i.e. handshake completed). The watchdog
+// uses `ready=false` to defer stall detection during the handshake
+// phase — see main.go::run().
+func (t *DataTunnel) Stats() (rx, tx int64, ready bool) {
+	return t.rxBytes.Load(), t.txBytes.Load(), t.gotFirstRx.Load()
+}
+
+// MarkRxStalled is called by RunRxStallWatchdog once it triggers.
+// The supervised run() reads this via WasRxStalled() to surface
+// ErrRxStall to its caller.
+func (t *DataTunnel) MarkRxStalled() {
+	t.rxStalled.Store(true)
+}
+
+// WasRxStalled reports whether the rx-stall watchdog fired during
+// this DataTunnel's lifetime. Each new DataTunnel starts with this
+// flag false, so the supervisor's per-attempt instance gives an
+// honest answer per attempt.
+func (t *DataTunnel) WasRxStalled() bool {
+	return t.rxStalled.Load()
+}
+
+// Default rx-stall watchdog timing. Public so callers can tune them
+// for tests; in production the defaults are fine on both Android and
+// Windows clients.
+var (
+	// DefaultRxStallTick — как часто опрашиваем rx-counter.
+	DefaultRxStallTick = 30 * time.Second
+	// DefaultRxStallTimeout — сколько rx может стоять до forced reconnect.
+	// 2 минуты выбраны под WG persistent-keepalive (25 сек) с запасом
+	// на несколько потерянных пакетов. Меньше — false-positive'ы при
+	// natural idle; больше — слишком долго жить с мёртвой сессией.
+	DefaultRxStallTimeout = 2 * time.Minute
+)
+
+// RunRxStallWatchdog следит за свежестью rx-трафика на DataTunnel и
+// зовёт cancel() когда обнаруживает stall. Идентичен по семантике
+// серверному watchdog'у в internal/inbound/manager.go::watchdog().
+//
+// Алгоритм: раз в `tick` смотрим [DataTunnel.Stats]. Пока handshake не
+// завершился (`ready==false`) — baseline'ы сбрасываются. После того
+// как пошёл первый WG-payload, начинаем мерить промежутки между
+// движениями rx-счётчика. Если за `rxStallTimeout` rx-байты не
+// сдвинулись — считаем сессию мёртвой, [DataTunnel.MarkRxStalled] +
+// cancel, выходим. Caller (run()/runSession) после возврата joiner'а
+// проверит [DataTunnel.WasRxStalled] и вернёт [ErrRxStall].
+//
+// Зачем: Telemost SFU умеет тихо "шейпить" media-tracks при долгой
+// сессии — control-channel (KCP keepalive/telemetry) остаётся живым,
+// а WG-пакеты через video-track перестают доставляться. Без watchdog'а
+// клиент висит в этом состоянии до перезапуска руками. Эта симметрия
+// со server-watchdog'ом и есть весь fix/client-rx-stall-watchdog.
+//
+// Используется параметризированная сигнатура (tick/timeout аргументами,
+// а не глобальными константами) только для тестов — в production
+// callers зовут через RunRxStallWatchdogDefault.
+func RunRxStallWatchdog(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	dt *DataTunnel,
+	lg *log.Logger,
+	tick time.Duration,
+	rxStallTimeout time.Duration,
+) {
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var (
+		lastRx     int64
+		lastChange = time.Now()
+		wasReady   bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rx, _, ready := dt.Stats()
+			if !ready {
+				lastRx = 0
+				lastChange = time.Now()
+				wasReady = false
+				continue
+			}
+			if !wasReady {
+				wasReady = true
+				lastRx = rx
+				lastChange = time.Now()
+				continue
+			}
+			if rx != lastRx {
+				lastRx = rx
+				lastChange = time.Now()
+				continue
+			}
+			if time.Since(lastChange) > rxStallTimeout {
+				if lg != nil {
+					lg.Printf("WATCHDOG no rx for %s after handshake — forcing reconnect", rxStallTimeout)
+				}
+				dt.MarkRxStalled()
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// RunRxStallWatchdogDefault — same as [RunRxStallWatchdog] with
+// production timings (DefaultRxStallTick / DefaultRxStallTimeout).
+func RunRxStallWatchdogDefault(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	dt *DataTunnel,
+	lg *log.Logger,
+) {
+	RunRxStallWatchdog(ctx, cancel, dt, lg, DefaultRxStallTick, DefaultRxStallTimeout)
 }
 
 func (t *DataTunnel) SetOnData(fn func([]byte)) {
