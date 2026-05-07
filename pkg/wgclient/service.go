@@ -178,6 +178,16 @@ type Service struct {
 	statusPtr    atomic.Pointer[Status]
 	activeBridge atomic.Pointer[wgrelay.SFUBridge]
 
+	// verbose controls whether trace-level lines (RTCP forwarding
+	// chatter, ping/ack keepalives, slot rebind scans, …) reach the
+	// log pipeline at all. Default false — those lines are dropped
+	// before they're stored or broadcast. Toggle with [SetVerbose].
+	//
+	// The CLI binary flips this on at startup so operators get the
+	// full output; the GUI binary defaults to off and exposes a
+	// toggle in the UI.
+	verbose atomic.Bool
+
 	subsMu sync.Mutex
 	subs   []chan Event
 
@@ -186,6 +196,9 @@ type Service struct {
 	logger   *log.Logger
 }
 
+// logBufCap caps the in-memory ring of recent log lines. Memory
+// footprint is bounded at ~logBufCap × len(LogLine) ≈ 500 × ~150 B
+// ≈ 75 KB regardless of how long the session runs.
 const logBufCap = 500
 
 // New returns a fresh Service in PhaseIdle.
@@ -299,6 +312,21 @@ func (s *Service) RecentLogs(limit int) []LogLine {
 // through the same capture pipeline (e.g. the CLI tool reusing this
 // package).
 func (s *Service) Logger() *log.Logger { return s.logger }
+
+// SetVerbose toggles whether trace-classified lines flow through the
+// log pipeline. When false (default), they're dropped at the entry
+// point — no ring-buffer growth, no event broadcast, zero CPU spent
+// formatting them per line. When true, every captured line goes
+// through normally.
+//
+// Switching the flag at runtime affects only future lines; lines
+// already in the ring buffer keep their original level so a later
+// RecentLogs call still surfaces what was captured at that level.
+func (s *Service) SetVerbose(on bool) { s.verbose.Store(on) }
+
+// Verbose returns the current verbose flag — handy for the JS
+// frontend to render initial UI state on first load.
+func (s *Service) Verbose() bool { return s.verbose.Load() }
 
 // ─── private machinery ─────────────────────────────────────────────
 
@@ -489,8 +517,16 @@ func (s *Service) fatalf(format string, args ...any) {
 
 // captureLog is fed each completed line by lineWriter. It tags level,
 // pushes into the ring buffer, and broadcasts an EventLog.
+//
+// If [SetVerbose] is off and the line classifies as trace, the line
+// is discarded before it enters the buffer or broadcast — keeps the
+// ringbuf focused on operationally interesting events and the wails
+// event channel free of per-RTCP-feedback chatter.
 func (s *Service) captureLog(text string) {
 	level := classifyLogLevel(text)
+	if level == "trace" && !s.verbose.Load() {
+		return
+	}
 	line := LogLine{Time: time.Now(), Level: level, Text: text}
 
 	s.logBufMu.Lock()

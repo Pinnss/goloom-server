@@ -69,20 +69,50 @@ func (s *Server) handleHTMXConnStrToast(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Inline-render rather than templ so the toast stays a single self-
 	// contained fragment without a dedicated *.templ file.
+	//
+	// Layout notes:
+	// - The connstr is dropped into a hidden textarea sibling; the
+	//   copy button reads it from there. Avoids the Alpine `$el` /
+	//   `this` confusion of the original implementation (where `this`
+	//   resolved to the Alpine component scope, not the DOM element,
+	//   so the copy handler silently no-op'd).
+	// - max-w-[min(560px,calc(100vw-2rem))] keeps the popover from
+	//   overflowing the viewport on narrow windows / RDP sessions
+	//   where bottom-4 right-4 anchoring would push it off-screen.
+	// - The connstr <div> uses break-all + whitespace-pre-wrap so a
+	//   long string wraps inside the card instead of growing it
+	//   horizontally past the viewport edge.
+	uriEsc := escapeHTML(uri)
 	fmt.Fprintf(w, `<div
-	  class="card text-xs max-w-md break-all"
-	  x-data="{shown:true}"
+	  class="card text-xs w-[min(560px,calc(100vw-2rem))]"
+	  x-data="{shown:true,copied:false,
+	           copy(){
+	             const ta=document.getElementById('toast-cs-src');
+	             navigator.clipboard.writeText(ta.value).then(()=>{
+	               this.copied=true;
+	               setTimeout(()=>{this.shown=false},900);
+	             }).catch(()=>{
+	               ta.removeAttribute('readonly'); ta.select();
+	               document.execCommand('copy');
+	               this.copied=true;
+	               setTimeout(()=>{this.shown=false},900);
+	             });
+	           }}"
 	  x-init="setTimeout(()=>shown=false,8000)"
 	  x-show="shown" x-transition.opacity
 	>
 	  <div class="flex items-center gap-2 mb-2">
 	    <strong>connection string</strong>
-	    <button class="ml-auto btn-ghost text-[10px] px-1.5 py-0.5"
-	      @click="navigator.clipboard.writeText(this.parentElement.nextElementSibling.textContent.trim()); shown=false"
-	    >Скопировать</button>
+	    <button class="ml-auto btn-primary text-[10px] px-2 py-0.5"
+	      @click="copy()" x-text="copied ? '✓ скопировано' : '📋 Скопировать'"
+	    >📋 Скопировать</button>
 	  </div>
-	  <pre class="font-mono text-[11px] bg-bg/60 p-2 rounded">%s</pre>
-	</div>`, escapeHTML(uri))
+	  <textarea id="toast-cs-src" readonly
+	    class="font-mono text-[11px] w-full bg-bg/60 p-2 rounded border border-border resize-none break-all"
+	    style="overflow-wrap:anywhere; word-break:break-all; white-space:pre-wrap"
+	    rows="4" onclick="this.select()"
+	  >%s</textarea>
+	</div>`, uriEsc)
 }
 
 func (s *Server) handleHTMXWGInterfaces(w http.ResponseWriter, r *http.Request) {

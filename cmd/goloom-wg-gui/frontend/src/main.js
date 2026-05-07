@@ -128,7 +128,14 @@ function boot() {
     els.btnDisc.addEventListener('click', doDisconnect);
     els.btnClear.addEventListener('click', () => { els.log.replaceChildren(); });
     els.chkTrace.addEventListener('change', () => {
-        els.log.classList.toggle('log-hide-trace', !els.chkTrace.checked);
+        const on = els.chkTrace.checked;
+        els.log.classList.toggle('log-hide-trace', !on);
+        // Tell the backend to start (or stop) routing trace lines into
+        // the ringbuf + event channel. Without this the toggle would
+        // be cosmetic only (trace was already filtered server-side).
+        if (window.go && window.go.main && window.go.main.App) {
+            window.go.main.App.SetVerbose(on).catch((err) => console.warn('SetVerbose:', err));
+        }
     });
 
     // Submit on Ctrl+Enter inside the connstr field.

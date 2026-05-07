@@ -45,6 +45,10 @@ func main() {
 	defer cancel()
 
 	svc := wgclient.New()
+	// CLI operators want the full firehose by default (used for
+	// diagnostics). The GUI flips this off via App.SetVerbose to keep
+	// its log pane operator-friendly.
+	svc.SetVerbose(true)
 
 	// Tee captured log lines to stdout so the CLI experience stays
 	// "what you printed is what you see". The GUI gets the same lines

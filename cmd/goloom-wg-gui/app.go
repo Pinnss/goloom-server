@@ -124,3 +124,14 @@ func (a *App) Status() wgclient.Status {
 func (a *App) RecentLogs(n int) []wgclient.LogLine {
 	return a.svc.RecentLogs(n)
 }
+
+// SetVerbose toggles trace-line capture. When off (default), the
+// SFU's RTCP / ping-ack chatter is dropped before it enters the
+// ring buffer or broadcast — keeps the log pane focused on
+// operationally interesting events and avoids spending CPU on
+// per-feedback-report formatting.
+func (a *App) SetVerbose(on bool) { a.svc.SetVerbose(on) }
+
+// Verbose returns the current verbose flag so the frontend can
+// initialise the UI checkbox state on first load.
+func (a *App) Verbose() bool { return a.svc.Verbose() }
