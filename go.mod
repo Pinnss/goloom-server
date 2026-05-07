@@ -1,12 +1,14 @@
 module github.com/Pinnss/goloom-server
 
-go 1.26
+go 1.25.5
 
 require github.com/google/uuid v1.6.0
 
 require (
+	github.com/a-h/templ v0.3.1001
 	github.com/coder/websocket v1.8.14
 	github.com/hashicorp/yamux v0.1.2
+	github.com/livekit/server-sdk-go/v2 v2.16.3
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/webrtc/v4 v4.2.12
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -45,9 +47,8 @@ require (
 	github.com/lithammer/shortuuid/v4 v4.2.0 // indirect
 	github.com/livekit/mageutil v0.0.0-20250511045019-0f1ff63f7731 // indirect
 	github.com/livekit/mediatransportutil v0.0.0-20251128105421-19c7a7b81c22 // indirect
-	github.com/livekit/protocol v1.45.8 // indirect
+	github.com/livekit/protocol v1.45.5-0.20260423163244-347de5a2ef78 // indirect
 	github.com/livekit/psrpc v0.7.1 // indirect
-	github.com/livekit/server-sdk-go/v2 v2.16.3 // indirect
 	github.com/magefile/mage v1.17.0 // indirect
 	github.com/nats-io/nats.go v1.48.0 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
@@ -73,7 +74,7 @@ require (
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/wlynxg/anet v0.0.6-0.20250109065809-5501d401a269 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel v1.40.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
@@ -87,8 +88,8 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260427160629-7cedc36a6bc4 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4 // indirect
-	google.golang.org/grpc v1.80.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260209200024-4cfbd4190f57 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
+	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )

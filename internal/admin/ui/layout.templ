@@ -1,0 +1,29 @@
+// Package ui contains the templ-based admin panel UI. Components are
+// written as .templ files compiled to *_templ.go via `templ generate`
+// (see Makefile target `make ui`).
+//
+// Layout is the top-level shell: <head> with HTMX/Alpine/Tailwind +
+// dark-theme body wrapper. Concrete pages plug their content via the
+// templ children mechanism.
+package ui
+
+// Layout is the global page shell. `bodyClass` is appended onto <body>
+// so individual pages (e.g. login) can opt into a centred layout.
+templ Layout(title, bodyClass string) {
+	<!doctype html>
+	<html lang="ru" class="bg-bg">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title }</title>
+			<link rel="stylesheet" href="/static/tailwind.css"/>
+			<link rel="icon" href="data:,"/>
+			<script src="/static/htmx.min.js"></script>
+			<script src="/static/htmx-sse.js"></script>
+			<script defer src="/static/alpine.min.js"></script>
+		</head>
+		<body class={ "min-h-screen bg-bg text-slate-100 font-sans antialiased", bodyClass }>
+			{ children... }
+		</body>
+	</html>
+}

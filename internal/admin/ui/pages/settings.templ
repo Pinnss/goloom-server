@@ -1,0 +1,41 @@
+package pages
+
+import (
+	"github.com/Pinnss/goloom-server/internal/admin/ui"
+)
+
+// Settings is a standalone change-password page (the dashboard already
+// surfaces the same form via a modal, but this exists for direct deep
+// links from operator runbooks, e.g. when the password change is the
+// only thing needing attention).
+templ Settings(username string) {
+	@ui.Layout("goloom admin · настройки", "") {
+		<main class="max-w-md mx-auto p-5">
+			<header class="mb-4">
+				<h1 class="text-lg font-semibold">Настройки</h1>
+				<p class="text-xs text-muted">Аккаунт <span class="font-mono text-slate-200">{ username }</span></p>
+			</header>
+			<form
+				class="card flex flex-col gap-3"
+				hx-post="/api/admin/password"
+				hx-ext="json-enc"
+				hx-target="#settings-msg"
+				hx-swap="innerHTML"
+			>
+				<div>
+					<label class="field-label">Текущий пароль</label>
+					<input class="field-input" name="current" type="password" autocomplete="current-password"/>
+				</div>
+				<div>
+					<label class="field-label">Новый пароль (8+ символов)</label>
+					<input class="field-input" name="new" type="password" autocomplete="new-password"/>
+				</div>
+				<div id="settings-msg" class="text-xs min-h-[1em]"></div>
+				<div class="flex gap-2">
+					<button class="btn-primary" type="submit">Сменить</button>
+					<a class="btn-ghost" href="/">Назад</a>
+				</div>
+			</form>
+		</main>
+	}
+}

@@ -1,0 +1,133 @@
+package components
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/Pinnss/goloom-server/internal/inbound"
+)
+
+// InboundCard renders one inbound row on the dashboard. The whole card
+// is HTMX-swappable: the SSE listener replaces it by ID when the
+// runner emits a status update. Action buttons hit the JSON API
+// endpoints we kept from the original admin server, then trigger a
+// targeted refresh.
+templ InboundCard(s inbound.Status) {
+	<div
+		class="card flex flex-col gap-2"
+		id={ "inbound-card-" + s.ID }
+		hx-swap-oob="true"
+	>
+		<div class="flex items-center justify-between">
+			<div class="flex items-center gap-2">
+				<span class="font-semibold text-base">{ s.Tag }</span>
+				@StatChip(s.Phase, s.Phase)
+			</div>
+			<div class="flex gap-1">
+				<button
+					class="btn-ghost text-xs px-2 py-1"
+					hx-post={ "/api/inbounds/" + s.ID + "/toggle" }
+					hx-swap="none"
+					title="Pause / resume"
+				>
+					if s.Enabled {
+						{ "⏸" }
+					} else {
+						{ "▶" }
+					}
+				</button>
+				<button
+					class="btn-danger text-xs px-2 py-1"
+					hx-delete={ "/api/inbounds/" + s.ID }
+					hx-target={ "#inbound-card-" + s.ID }
+					hx-swap="outerHTML"
+					hx-confirm="Удалить inbound?"
+					title="Delete"
+				>{ "✕" }</button>
+			</div>
+		</div>
+
+		<dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs">
+			<dt class="text-muted">Meeting</dt>
+			<dd class="font-mono break-all text-right">{ shortURL(s.Meeting, 60) }</dd>
+			<dt class="text-muted">WG endpoint</dt>
+			<dd class="font-mono text-right">{ s.WGEndpoint }</dd>
+			if s.WGIface != "" {
+				<dt class="text-muted">WG iface</dt>
+				<dd class="font-mono text-right">{ s.WGIface }</dd>
+			}
+			<dt class="text-muted">↑ TX</dt>
+			<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.TxPackets, humanBytes(s.TxBytes)) }</dd>
+			<dt class="text-muted">↓ RX</dt>
+			<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.RxPackets, humanBytes(s.RxBytes)) }</dd>
+			if s.LastError != "" {
+				<dt class="text-muted">error</dt>
+				<dd class="text-danger text-right break-all">{ s.LastError }</dd>
+			}
+		</dl>
+
+		<div class="flex items-center justify-center bg-white rounded p-2">
+			<img src={ "/api/inbounds/" + s.ID + "/qr.png" } alt="QR" class="max-w-[180px] aspect-square"/>
+		</div>
+
+		<div class="flex flex-wrap gap-1.5 mt-1">
+			<button
+				class="btn-primary text-xs px-2 py-1"
+				hx-get={ "/htmx/inbound/" + s.ID + "/connstr" }
+				hx-target="#toast"
+				hx-swap="innerHTML"
+				title="Скопировать connection string"
+			>{ "📋 connection" }</button>
+			<a
+				class="btn-ghost text-xs px-2 py-1"
+				href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
+				download
+			>{ "⬇ wg.conf" }</a>
+		</div>
+	</div>
+}
+
+// InboundCardList is the wrapper that holds all card elements; SSE
+// "inbounds" event replaces this whole node so newly created / removed
+// inbounds appear without a page refresh.
+templ InboundCardList(items []inbound.Status) {
+	<div
+		id="inbound-card-list"
+		class="grid gap-3.5"
+		style="grid-template-columns:repeat(auto-fill,minmax(380px,1fr))"
+	>
+		if len(items) == 0 {
+			<div class="col-span-full text-center text-muted py-10">
+				Пока пусто. Нажми <b>+ Создать inbound</b> сверху.
+			</div>
+		}
+		for _, s := range items {
+			@InboundCard(s)
+		}
+	</div>
+}
+
+func shortURL(u string, max int) string {
+	if len(u) <= max {
+		return u
+	}
+	return u[:max-3] + "..."
+}
+
+func humanBytes(n uint64) string {
+	const k = uint64(1024)
+	switch {
+	case n < k:
+		return fmt.Sprintf("%d B", n)
+	case n < k*k:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(k))
+	case n < k*k*k:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(k*k))
+	default:
+		return fmt.Sprintf("%.2f GB", float64(n)/float64(k*k*k))
+	}
+}
+
+// Avoid an unused-import warning if the file is regenerated without
+// referencing strings (keeps templ's stale-import check happy).
+var _ = strings.TrimSpace

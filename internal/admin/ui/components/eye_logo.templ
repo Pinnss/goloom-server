@@ -1,0 +1,86 @@
+package components
+
+// EyeLogo is the animated brand mark — an almond-shaped eye with a
+// pupil that dilates between three states. Mirrors the Android client's
+// `design/GoloomEye.kt`. The state is bound via Alpine: replace `state`
+// with an x-data expression at the call-site if it should react live
+// (e.g. SSE flips the connection status).
+//
+// States:
+//   "idle"        - relaxed eye, slow blink loop
+//   "connecting"  - pulsing pupil, eyebrow tightens
+//   "on"          - fully open, accent-coloured iris
+templ EyeLogo(state string, sizePx int) {
+	<svg
+		viewBox="0 0 64 32"
+		width={ formatPx(sizePx) }
+		height={ formatPx(sizePx / 2) }
+		class={ "drop-shadow-[0_0_6px_rgba(76,217,100,0.25)]", eyeStateClass(state) }
+		x-data={ "{ state: '" + state + "' }" }
+	>
+		// Almond/lid silhouette — drawn as a stroked ellipse path so the
+		// blink animation is just a vertical scale on the path's bounding
+		// box centred at y=16.
+		<g transform="translate(32 16)">
+			<g class="origin-center animate-blink">
+				<path
+					d="M -28 0 Q -14 -16 0 -16 Q 14 -16 28 0 Q 14 16 0 16 Q -14 16 -28 0 Z"
+					fill="#0e1014"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linejoin="round"
+				></path>
+				// Iris ring
+				<circle r="9" fill="#0e1014" stroke="currentColor" stroke-width="1.5"></circle>
+				// Pupil — animated only in "connecting" state
+				if state == "connecting" {
+					<circle r="3.5" fill="currentColor" class="animate-pulse2"></circle>
+				} else {
+					<circle r="4" fill="currentColor"></circle>
+				}
+				// Catchlight — fixed highlight to give it character
+				<circle cx="-2.5" cy="-2.5" r="1" fill="#fff" opacity="0.85"></circle>
+			</g>
+		</g>
+	</svg>
+}
+
+// eyeStateClass picks the colour the eye is rendered in. We attach it
+// via currentColor so all interior strokes/pupils inherit it, mirroring
+// the Compose tokens used on Android.
+func eyeStateClass(state string) string {
+	switch state {
+	case "on":
+		return "text-accent"
+	case "connecting":
+		return "text-warn"
+	default:
+		return "text-slate-300"
+	}
+}
+
+func formatPx(n int) string {
+	// templ's attribute syntax doesn't support int templating so we
+	// stringify in a tiny helper. Defensive lower bound — anything below
+	// 16px renders unreadable.
+	if n < 16 {
+		n = 16
+	}
+	return itoa(n)
+}
+
+func itoa(n int) string {
+	// stdlib strconv would pull a heavier import for a 1-liner; we keep
+	// this leaf-level helper inline. Negative numbers can't happen.
+	if n == 0 {
+		return "0"
+	}
+	var buf [12]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

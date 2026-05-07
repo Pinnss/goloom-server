@@ -162,7 +162,12 @@ func (s *Server) currentUser(r *http.Request) (string, bool) {
 }
 
 func isPublicPath(p string) bool {
-	return p == "/login" || p == "/static/style.css" || p == "/favicon.ico"
+	if p == "/login" || p == "/favicon.ico" {
+		return true
+	}
+	// Static assets (Tailwind CSS, HTMX, Alpine, htmx-sse) must be
+	// reachable from the unauthenticated login page.
+	return strings.HasPrefix(p, "/static/")
 }
 
 func isAPIPath(p string) bool {

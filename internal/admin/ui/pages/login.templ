@@ -1,0 +1,62 @@
+package pages
+
+import (
+	"github.com/Pinnss/goloom-server/internal/admin/ui"
+	"github.com/Pinnss/goloom-server/internal/admin/ui/components"
+)
+
+// Login is the standalone unauthenticated page. We deliberately keep
+// the credentials form HTMX-driven (hx-post + hx-on::after-request)
+// rather than full reload so the failure path can flash an inline
+// error without bouncing the user.
+templ Login(errMsg string) {
+	@ui.Layout("goloom admin · вход", "flex items-center justify-center") {
+		<div class="w-full max-w-sm mx-auto p-6">
+			<div class="flex justify-center mb-6">
+				@components.EyeLogo("idle", 96)
+			</div>
+			<form
+				class="card flex flex-col gap-3"
+				hx-post="/login"
+				hx-swap="innerHTML"
+				hx-target="#login-error"
+				hx-on::after-request="if (event.detail.successful) location.href='/'"
+			>
+				<h1 class="text-base font-semibold">goloom admin</h1>
+				<div>
+					<label class="field-label">Логин</label>
+					<input
+						class="field-input"
+						name="username"
+						value="admin"
+						autocomplete="username"
+						autofocus
+					/>
+				</div>
+				<div>
+					<label class="field-label">Пароль</label>
+					<input
+						class="field-input"
+						type="password"
+						name="password"
+						autocomplete="current-password"
+					/>
+				</div>
+				<div id="login-error" class="text-danger text-xs min-h-[1em]">
+					if errMsg != "" {
+						{ errMsg }
+					}
+				</div>
+				<button class="btn-primary" type="submit">Войти</button>
+			</form>
+		</div>
+	}
+}
+
+// LoginError is the partial returned when /login responds with a bad
+// credentials status — HTMX swaps it into #login-error. Keeping a
+// dedicated component avoids hand-rolling HTML strings inside the Go
+// handler.
+templ LoginError(msg string) {
+	<span>{ msg }</span>
+}

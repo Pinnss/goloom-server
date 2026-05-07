@@ -1,0 +1,40 @@
+package components
+
+// Modal is a generic Alpine-driven dialog. Show/hide by toggling
+// `Alpine.store('modals').<name>` boolean, e.g.:
+//
+//   <button @click="$store.modals.account = true">Аккаунт</button>
+//   @components.Modal("account", "Сменить пароль") { ... }
+//
+// Backdrop click closes; Esc closes; focus trap is handled by Alpine
+// where `x-trap.inert` is supported, otherwise it's a soft trap.
+templ Modal(name, title string) {
+	<div
+		x-data
+		x-show={ "$store.modals." + name }
+		x-cloak
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+		@keydown.escape.window={ "$store.modals." + name + " = false" }
+		@click.self={ "$store.modals." + name + " = false" }
+		style="display:none"
+	>
+		<div
+			class="card w-full max-w-md mx-4"
+			@click.stop
+		>
+			<h2 class="text-base font-semibold mb-3">{ title }</h2>
+			{ children... }
+		</div>
+	</div>
+}
+
+// ModalsStore registers the Alpine store the Modal component reads
+// from. Drop one of these once per page (typically in Layout-level
+// children) so all modals share state cleanly.
+templ ModalsStore() {
+	<script>
+	document.addEventListener('alpine:init', () => {
+	  Alpine.store('modals', { account: false, inbound: false });
+	});
+	</script>
+}

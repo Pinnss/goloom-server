@@ -5,6 +5,11 @@
 /goloom-wg-client
 /goloom-wg-client.exe
 
+# Standalone Tailwind CLI binary, downloaded by `make tools-tailwind`.
+# Stays per-developer because it's ~40MB and OS-specific.
+/tools/tailwindcss
+/tools/tailwindcss.exe
+
 # Build outputs
 /build/
 /dist/
