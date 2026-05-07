@@ -7,7 +7,22 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 )
+
+// hiddenCmd builds an exec.Cmd whose console subprocess is created
+// with CREATE_NO_WINDOW so it doesn't flash a black cmd box at the
+// user. We invoke route.exe many times during a single connect
+// (1 × `route print` + N × `route add` per excluded IP), so without
+// this every connect would strobe the screen.
+//
+// Lives in routes_windows.go because syscall.SysProcAttr.HideWindow
+// is Windows-only.
+func hiddenCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd
+}
 
 type RouteManager struct {
 	tunName     string
@@ -38,7 +53,7 @@ func NewRouteManager(tunName string, tunGateway net.IP, tunIfIndex int, lg *log.
 }
 
 func (rm *RouteManager) SaveOriginalState() error {
-	out, err := exec.Command("route", "print", "0.0.0.0").CombinedOutput()
+	out, err := hiddenCmd("route", "print", "0.0.0.0").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route print: %w", err)
 	}
@@ -109,7 +124,7 @@ func (rm *RouteManager) addRouteIF(dest, mask, gw string, ifIndex int) error {
 	if ifIndex > 0 {
 		args = append(args, "IF", fmt.Sprintf("%d", ifIndex))
 	}
-	out, err := exec.Command("route", args...).CombinedOutput()
+	out, err := hiddenCmd("route", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route add %s mask %s %s: %w (%s)", dest, mask, gw, err, strings.TrimSpace(string(out)))
 	}
@@ -132,7 +147,7 @@ func (rm *RouteManager) Restore() {
 		if r.ifIndex > 0 {
 			args = append(args, "IF", fmt.Sprintf("%d", r.ifIndex))
 		}
-		out, err := exec.Command("route", args...).CombinedOutput()
+		out, err := hiddenCmd("route", args...).CombinedOutput()
 		if err != nil {
 			rm.logger.Printf("ROUTES restore delete %s: %v (%s)", r.dest, err, strings.TrimSpace(string(out)))
 		} else {

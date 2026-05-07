@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"strings"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -69,7 +68,7 @@ func CreateTUN(name string, cidr string, mtu int, dns []string, lg *log.Logger) 
 
 func (d *Device) configure() error {
 	mask := net.IP(d.IPNet.Mask).String()
-	out, err := exec.Command("netsh", "interface", "ip", "set", "address",
+	out, err := hiddenCmd("netsh", "interface", "ip", "set", "address",
 		fmt.Sprintf("name=%s", d.Name), "static", d.IP.String(), mask,
 	).CombinedOutput()
 	if err != nil {
@@ -88,7 +87,7 @@ func (d *Device) configure() error {
 		} else {
 			args = append(args, dns, fmt.Sprintf("index=%d", i+1))
 		}
-		out, err := exec.Command("netsh", args...).CombinedOutput()
+		out, err := hiddenCmd("netsh", args...).CombinedOutput()
 		if err != nil {
 			d.Logger.Printf("TUN dns %s: %v (%s)", dns, err, strings.TrimSpace(string(out)))
 		}
@@ -103,7 +102,7 @@ func (d *Device) configure() error {
 func (d *Device) lookupIfIndex() (int, error) {
 	iface, err := net.InterfaceByName(d.Name)
 	if err != nil {
-		out, err2 := exec.Command("netsh", "interface", "ip", "show", "config", fmt.Sprintf("name=%s", d.Name)).CombinedOutput()
+		out, err2 := hiddenCmd("netsh", "interface", "ip", "show", "config", fmt.Sprintf("name=%s", d.Name)).CombinedOutput()
 		if err2 != nil {
 			return 0, fmt.Errorf("net.InterfaceByName: %w; netsh fallback: %w", err, err2)
 		}
