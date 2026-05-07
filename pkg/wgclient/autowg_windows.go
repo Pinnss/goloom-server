@@ -53,10 +53,12 @@ type autoWG struct {
 // startAutoWG brings up the tun + wg pipeline. The route manager
 // must already have SaveOriginalState'd; this call adds the
 // 0/1+128/1 default-route pair via the new tun before returning.
+// svc is optional — when non-nil, the state-probe goroutine reads
+// bridge counters through it for combined WG+bridge diagnostics.
 //
 // On any error the partial state is rolled back so the caller
 // doesn't have to remember which steps succeeded.
-func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr string, rm *tun.RouteManager) (*autoWG, error) {
+func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr string, rm *tun.RouteManager, svc *Service) (*autoWG, error) {
 	if !cfg.Valid() {
 		return nil, errors.New("auto-WG: incomplete WGParams (need client_private_key, server_public_key, client_addr)")
 	}
@@ -172,7 +174,9 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 		tunDev.Name, cfg.ClientAddr, endpoint, abbrevKey(cfg.ServerPublicKey))
 
 	a := &autoWG{tun: tunDev, dev: wgDev, logger: lg}
-	go a.runStateProbe(ctx)
+	if svc != nil {
+		go a.runStateProbe(ctx, svc)
+	}
 
 	cleanup = nil
 	return a, nil
@@ -182,7 +186,7 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 // last_handshake_time + transfer counters so we can see whether
 // wireguard-go is actually pumping data through the tunnel. Goes
 // silent once ctx is cancelled.
-func (a *autoWG) runStateProbe(ctx context.Context) {
+func (a *autoWG) runStateProbe(ctx context.Context, svc *Service) {
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	for {
@@ -198,8 +202,12 @@ func (a *autoWG) runStateProbe(ctx context.Context) {
 				a.logger.Printf("WARN auto-WG: IpcGet: %v", err)
 				continue
 			}
-			summary := summarisePeerState(ipc)
-			a.logger.Printf("auto-WG state: %s", summary)
+			wgPart := summarisePeerState(ipc)
+			if br := svc.BridgeStats(); br != "" {
+				a.logger.Printf("auto-WG state: WG[%s] BRIDGE[%s]", wgPart, br)
+			} else {
+				a.logger.Printf("auto-WG state: WG[%s] (no bridge)", wgPart)
+			}
 		}
 	}
 }

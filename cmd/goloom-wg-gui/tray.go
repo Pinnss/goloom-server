@@ -182,11 +182,15 @@ func (t *trayController) connect() {
 func (t *trayController) disconnect() { t.app.svc.Stop() }
 
 func (t *trayController) quit() {
-	// Tear down the session first, then unblock the wails main loop.
-	// runtime.Quit triggers the OnShutdown hook on the App, which
-	// also stops the service — but doing it here too is harmless and
-	// gets us a cleaner ordering when the user mashes Quit during a
-	// flaky teardown.
+	// Mark the app as really-quitting BEFORE asking wails to close,
+	// so the OnBeforeClose hook lets the close go through instead
+	// of converting it back to "hide to tray".
+	t.app.BeginQuit()
+
+	// Tear down the session first so the tunnel/route cleanup
+	// happens while wails is still up (and our log capture still
+	// shows it). runtime.Quit then drives the OnShutdown hook for
+	// the rest of the cleanup; systray.Quit drops the tray icon.
 	t.app.svc.Stop()
 	if t.app.ctx != nil {
 		runtime.Quit(t.app.ctx)

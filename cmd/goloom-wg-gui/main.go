@@ -57,8 +57,12 @@ func main() {
 		// Closing the window hides instead of quitting — the tray
 		// stays alive so the operator can pop the window back open
 		// without restarting the tunnel session. Use the tray "Выйти"
-		// menu (or Alt+F4 from the Wails main loop) to actually quit.
+		// menu to actually quit (it sets app.BeginQuit() first so
+		// this hook lets the close go through).
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
+			if app.QuittingAllowed() {
+				return false // proceed with shutdown
+			}
 			runtime.WindowHide(ctx)
 			return true
 		},

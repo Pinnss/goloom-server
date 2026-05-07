@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync/atomic"
 
 	"github.com/Pinnss/goloom-server/pkg/wgclient"
 
@@ -29,6 +30,13 @@ type App struct {
 	// stopFanOut closes when shutdown begins, so fan-out goroutine
 	// drops its subscription cleanly.
 	stopFanOut chan struct{}
+
+	// quitting flips to true when the tray "Выйти" menu (or any other
+	// real-shutdown path) fires. OnBeforeClose checks this to decide
+	// whether to actually close (true → close) or hide-to-tray
+	// (false → keep alive). Without this the X-button-hides-to-tray
+	// behaviour also swallowed runtime.Quit() calls from the tray.
+	quitting atomic.Bool
 }
 
 // NewApp creates a new App with a fresh Service. Subscribe + event
@@ -77,6 +85,17 @@ func (a *App) shutdown(ctx context.Context) {
 	close(a.stopFanOut)
 	a.svc.Stop()
 }
+
+// QuittingAllowed is checked from main.go's OnBeforeClose hook. When
+// false (default), closing the window hides to tray. When true, the
+// tray "Выйти" menu has already initiated a real exit and the close
+// should proceed normally.
+func (a *App) QuittingAllowed() bool { return a.quitting.Load() }
+
+// BeginQuit marks the App as in the middle of a real shutdown. Called
+// from the tray Quit handler before runtime.Quit so the OnBeforeClose
+// hook lets the close go through.
+func (a *App) BeginQuit() { a.quitting.Store(true) }
 
 // fanOutEvents subscribes to the service and re-emits events through
 // the Wails runtime so JS can listen via window.runtime.EventsOn.

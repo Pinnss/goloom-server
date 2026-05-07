@@ -273,6 +273,18 @@ func (s *Service) Status() Status {
 	return st
 }
 
+// BridgeStats returns the live SFU bridge counters as a one-liner
+// suitable for log diagnostics. "" if no bridge is currently active.
+func (s *Service) BridgeStats() string {
+	br := s.activeBridge.Load()
+	if br == nil {
+		return ""
+	}
+	return fmt.Sprintf("rx_from_wg=%d/%dB tx_to_wg=%d/%dB",
+		br.RxPackets.Load(), br.RxBytes.Load(),
+		br.TxPackets.Load(), br.TxBytes.Load())
+}
+
 // Start spawns the supervise loop in the background. Returns
 // immediately. Subsequent Start calls while a session is active are
 // rejected with ErrAlreadyRunning.
@@ -414,7 +426,7 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 			s.fatalf("auto-WG requested but WGParams incomplete (need keys + client_addr from connstr)")
 			return
 		}
-		got, err := startAutoWG(ctx, lg, cfg.WG, cfg.ListenAddr, rm)
+		got, err := startAutoWG(ctx, lg, cfg.WG, cfg.ListenAddr, rm, s)
 		if err != nil {
 			s.fatalf("auto-WG: %v", err)
 			return

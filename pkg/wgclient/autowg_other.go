@@ -17,7 +17,7 @@ import (
 
 type autoWG struct{}
 
-func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr string, rm *tun.RouteManager) (*autoWG, error) {
+func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr string, rm *tun.RouteManager, svc *Service) (*autoWG, error) {
 	return nil, errors.New("auto-WG is only implemented on Windows today")
 }
 
