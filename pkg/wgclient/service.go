@@ -549,21 +549,33 @@ func classifyLogLevel(text string) string {
 }
 
 // isTraceNoise returns true for lines that shouldn't show up in the
-// operator's log pane by default. Match against the message body
-// stripped of the leading "[goloom-wg] DATE TIME" prefix added by
-// the standard log.Logger — but we don't bother stripping; the
-// patterns are anchored on tokens unique to the noisy categories.
+// operator's log pane by default. Patterns are deliberately anchored
+// on substrings unique to the high-volume diagnostic categories the
+// SFU stack emits at info level by default.
+//
+// We don't strip the standard logger's "[goloom-wg] DATE TIME"
+// prefix before matching — it's enough to look for distinctive
+// fragments anywhere in the line.
 func isTraceNoise(text string) bool {
 	// SubscriberMaster slot scan: "slot[12] empty/other raw=..."
 	if strings.Contains(text, " slot[") &&
 		(strings.Contains(text, "empty/other") || strings.Contains(text, " empty/")) {
 		return true
 	}
-	// Periodic RTCP SR/RR blasts:
-	//   "PUB-rtcp[ef09f86a] SR ssrc=4006457592 packets=42 octets=1049"
-	//   "SUB-rtcp[...] SR ssrc=..."
-	if (strings.Contains(text, "PUB-rtcp[") || strings.Contains(text, "SUB-rtcp[")) &&
-		(strings.Contains(text, " SR ") || strings.Contains(text, " RR ")) {
+	// All PUB-rtcp / SUB-rtcp forwarding chatter. Pion logs every
+	// received report — SR/RR statistics, transport-cc CCFeedback,
+	// REMB, NACK, PLI, FIR. All are SFU-debug useful, operator
+	// noise. Examples:
+	//   "PUB-rtcp[audio] *rtcp.CCFeedbackReport"
+	//   "SUB-rtcp[ef09f86a] SR ssrc=4006457592 packets=42 octets=1049"
+	//   "PUB-rtcp[abcd1234] *rtcp.PictureLossIndication"
+	if strings.Contains(text, "PUB-rtcp[") || strings.Contains(text, "SUB-rtcp[") {
+		return true
+	}
+	// Tunnel keepalive ping/ack pairs (every ~5s):
+	//   "→ ping (uid=..., 56 bytes)"
+	//   "← ack  (uid=..., 96 bytes)"
+	if strings.Contains(text, "ping (uid=") || strings.Contains(text, "ack (uid=") {
 		return true
 	}
 	// WG bridge packet counters: "WG-BRIDGE ↑ pkt #123 ..." (every 200th)
