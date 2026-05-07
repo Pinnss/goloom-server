@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>goloom</title>
+    <link href="/main.css" rel="stylesheet"/>
+</head>
+<body>
+<header class="header">
+    <svg class="logo" viewBox="0 0 64 32" width="48" height="24">
+        <g transform="translate(32 16)">
+            <g class="eye">
+                <path d="M -28 0 Q -14 -16 0 -16 Q 14 -16 28 0 Q 14 16 0 16 Q -14 16 -28 0 Z"
+                      fill="#0e1014" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                <circle r="9" fill="#0e1014" stroke="currentColor" stroke-width="1.5"/>
+                <circle r="4" fill="currentColor"/>
+                <circle cx="-2.5" cy="-2.5" r="1" fill="#fff" opacity="0.85"/>
+            </g>
+        </g>
+    </svg>
+    <h1>goloom</h1>
+    <span class="badge">client</span>
+    <div class="grow"></div>
+    <span id="phase-chip" class="chip chip-idle">idle</span>
+</header>
+
+<main>
+    <section class="card">
+        <h2>Подключение</h2>
+        <label class="field-label" for="connstr">Connection string из админки</label>
+        <textarea id="connstr" class="field" rows="3" autocomplete="off"
+                  placeholder="goloom://eyJ..."></textarea>
+        <div class="row">
+            <button id="btn-connect" class="btn btn-primary">Connect</button>
+            <button id="btn-disconnect" class="btn btn-ghost" disabled>Disconnect</button>
+            <span id="error" class="err"></span>
+        </div>
+    </section>
+
+    <section class="card status-card">
+        <h2>Статус</h2>
+        <dl class="kv">
+            <dt>Transport</dt><dd id="s-transport">—</dd>
+            <dt>Meeting</dt><dd id="s-meeting" class="mono">—</dd>
+            <dt>Local UDP</dt><dd id="s-local" class="mono">—</dd>
+            <dt>Peer</dt><dd id="s-peer" class="mono">—</dd>
+            <dt>↑ TX</dt><dd id="s-tx" class="mono">0 / 0 B</dd>
+            <dt>↓ RX</dt><dd id="s-rx" class="mono">0 / 0 B</dd>
+            <dt>Last error</dt><dd id="s-err" class="mono err">—</dd>
+        </dl>
+    </section>
+
+    <section class="card log-card">
+        <div class="log-head">
+            <h2>Лог</h2>
+            <button id="btn-clear-log" class="btn btn-ghost btn-xs">Очистить</button>
+        </div>
+        <div id="log" class="log"></div>
+    </section>
+</main>
+
+<script src="/main.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+# Wails bin directory
+build/bin
+# Wails Windows NSIS support files
+build/windows/installer/wails_tools.nsh
+build/windows/installer/tmp/
+
+# Wails-generated JS bindings — re-emitted on every `wails build` from
+# the Go source; check them in only if you want to lock the dev-mode
+# experience. We regenerate, so don't track noise here.
+frontend/wailsjs/
+
+# IDEs
+.idea
+.vscode
+
+# The black hole that is...
+node_modules

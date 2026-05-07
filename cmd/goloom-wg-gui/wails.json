@@ -1,0 +1,10 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "goloom-wg-gui",
+  "outputfilename": "goloom-wg-gui",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "Pin",
+    "email": "piniginsv9toslav@gmail.com"
+  }
+}
