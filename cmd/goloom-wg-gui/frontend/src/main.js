@@ -69,6 +69,11 @@ const emojiPhase = {
 let profiles = [];
 let activeProfileId = '';
 
+// Last status snapshot — kept so renderProfileList can re-evaluate
+// the Connect/Disconnect button enablement after a profile add/delete
+// without needing to re-pull from the backend.
+let currentStatus = { phase: 'idle' };
+
 // Modal state — track which profile is being edited (null for new).
 let editingProfileId = null;
 
@@ -94,6 +99,7 @@ function setPhase(phase) {
 
 function applyStatus(st) {
     if (!st) return;
+    currentStatus = st;
     setPhase(st.phase);
     els.sTrans.textContent   = st.transport || '—';
     els.sMeeting.textContent = st.meeting || '—';
@@ -157,26 +163,28 @@ function renderProfileList(preferId) {
     if (profiles.length === 0) {
         els.profileEmpty.hidden = false;
         els.profileCtrls.hidden = true;
-        els.btnConn.disabled = true;
-        // also reflect "no profile" in the status pane
         els.sProfile.textContent = '—';
-        return;
-    }
-    els.profileEmpty.hidden = true;
-    els.profileCtrls.hidden = false;
+    } else {
+        els.profileEmpty.hidden = true;
+        els.profileCtrls.hidden = false;
 
-    for (const p of profiles) {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = p.name;
-        sel.appendChild(opt);
+        for (const p of profiles) {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name;
+            sel.appendChild(opt);
+        }
+        // Selection priority: explicit prefer (from save), then last-active, then first.
+        const pick = preferId && profiles.find((p) => p.id === preferId)
+            ? preferId
+            : (profiles.find((p) => p.id === activeProfileId) ? activeProfileId : profiles[0].id);
+        sel.value = pick;
+        onProfileSelectionChanged();
     }
-    // Selection priority: explicit prefer (from save), then last-active, then first.
-    const pick = preferId && profiles.find((p) => p.id === preferId)
-        ? preferId
-        : (profiles.find((p) => p.id === activeProfileId) ? activeProfileId : profiles[0].id);
-    sel.value = pick;
-    onProfileSelectionChanged();
+    // Profile-set or selection changed — re-apply the cached status so
+    // Connect/Disconnect enablement (which depends on profiles.length)
+    // refreshes without us having to wait for the next status push.
+    applyStatus(currentStatus);
 }
 
 function selectedProfile() {
