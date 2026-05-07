@@ -45,8 +45,16 @@ func wgInterfaceList(opts Options) []wgInterfaceInfo {
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	s.registerAuthRoutes(mux)
-	mux.HandleFunc("GET /static/style.css", s.handleCSS)
+
+	// Static assets — embedded JS/CSS, served from internal/admin/static.
+	mux.Handle("GET /static/", staticHandler())
+
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
+	mux.HandleFunc("GET /settings", s.handleSettings)
+
+	// JSON API kept stable so anything scripting against it (e.g.
+	// the existing fetch-based UI scripts in pre-templ deploys) keeps
+	// working during the rollout.
 	mux.HandleFunc("GET /api/inbounds", s.handleListInbounds)
 	mux.HandleFunc("POST /api/inbounds", s.handleCreateInbound)
 	mux.HandleFunc("DELETE /api/inbounds/{id}", s.handleDeleteInbound)
@@ -56,6 +64,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/inbounds/{id}/qr.png", s.handleQR)
 	mux.HandleFunc("GET /api/system/wg-interfaces", s.handleListWGInterfaces)
 	mux.HandleFunc("GET /api/inbounds/{id}/history", s.handleInboundHistory)
+
+	// HTMX-fragment endpoints — HTML responses small enough to swap
+	// directly. Kept under /htmx/ so the API surface stays clean.
+	s.registerHTMXRoutes(mux)
 }
 
 func (s *Server) handleInboundHistory(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +107,12 @@ type createInboundReq struct {
 	Meeting     string `json:"meeting"`
 	DisplayName string `json:"display_name"`
 
+	// Transport lets the operator pick "telemost" or "wb_stream" from
+	// the new dropdown. Today both map onto inbound.Spec.Meeting and the
+	// existing runner; once feat/sfu-multi-transport lands the Spec
+	// itself will grow a transport discriminator and we'll persist it.
+	Transport string `json:"transport"`
+
 	// AutoProvision asks the server to allocate a fresh wgN interface
 	// from the provisioner pool. If false, WGEndpoint must be supplied.
 	AutoProvision bool   `json:"auto_provision"`
@@ -102,9 +120,9 @@ type createInboundReq struct {
 }
 
 func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
-	var req createInboundReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	req, err := decodeCreateInboundRequest(r)
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.Tag == "" || req.Meeting == "" {
@@ -313,4 +331,38 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// decodeCreateInboundRequest accepts JSON (legacy fetch + json-enc HTMX)
+// or url-encoded form bodies (default HTMX). Form bodies use string
+// values for booleans, so we coerce common truthy strings.
+func decodeCreateInboundRequest(r *http.Request) (createInboundReq, error) {
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		var req createInboundReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return createInboundReq{}, err
+		}
+		return req, nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return createInboundReq{}, err
+	}
+	return createInboundReq{
+		Tag:           strings.TrimSpace(r.PostFormValue("tag")),
+		Meeting:       strings.TrimSpace(r.PostFormValue("meeting")),
+		DisplayName:   strings.TrimSpace(r.PostFormValue("display_name")),
+		Transport:     strings.TrimSpace(r.PostFormValue("transport")),
+		AutoProvision: parseBool(r.PostFormValue("auto_provision")),
+		WGEndpoint:    strings.TrimSpace(r.PostFormValue("wg_endpoint")),
+	}, nil
+}
+
+func parseBool(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "on", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }

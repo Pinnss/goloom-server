@@ -2,14 +2,16 @@ package admin
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/Pinnss/goloom-server/internal/admin/ui/pages"
 )
 
-// registerAuthRoutes wires endpoints that the auth-middleware lets
-// through unauthenticated (login form) plus the post-auth endpoints
-// for state and password change.
+// registerAuthRoutes wires endpoints that the auth middleware lets
+// through unauthenticated (the login form and its POST handler) plus
+// the post-auth state and password-change endpoints.
 func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLogin)
@@ -20,13 +22,12 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	// Если уже залогинен — сразу на дашборд.
 	if _, ok := s.currentUser(r); ok {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, loginHTML)
+	_ = pages.Login("").Render(reqCtx(r), w)
 }
 
 type loginReq struct {
@@ -34,17 +35,27 @@ type loginReq struct {
 	Password string `json:"password"`
 }
 
+// handleLogin accepts both JSON (legacy fetch-based clients) and
+// form-encoded bodies (HTMX form submissions). Successful login writes
+// the session cookie and returns 204 — the HTMX afterRequest hook on
+// the login page redirects on success, so no body is needed.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req loginReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	req, err := decodeLoginRequest(r)
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	req.Username = strings.TrimSpace(req.Username)
+
 	if !s.opts.Credentials.Verify(req.Username, req.Password) {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		// HTMX clients swap the response body into the error slot; for
+		// non-HTMX callers the same string body lands in alert(). 401
+		// stays so any tooling can distinguish bad creds.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = pages.LoginError("Неверный логин или пароль").Render(reqCtx(r), w)
 		return
 	}
+
 	tok, err := s.sessions.New(req.Username)
 	if err != nil {
 		http.Error(w, "session: "+err.Error(), http.StatusInternalServerError)
@@ -55,13 +66,35 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
-		// Secure только если соединение TLS — иначе браузер не сохранит
-		// cookie при заходе по http (например в локальной разработке).
+		// Secure cookie only over TLS, otherwise browsers drop it on
+		// http (matters for local dev where TLS is off).
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func decodeLoginRequest(r *http.Request) (loginReq, error) {
+	ct := r.Header.Get("Content-Type")
+	switch {
+	case strings.Contains(ct, "application/json"):
+		var req loginReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return loginReq{}, err
+		}
+		req.Username = strings.TrimSpace(req.Username)
+		return req, nil
+	default:
+		// HTMX (and HTML form fallback) send url-encoded bodies.
+		if err := r.ParseForm(); err != nil {
+			return loginReq{}, err
+		}
+		return loginReq{
+			Username: strings.TrimSpace(r.PostFormValue("username")),
+			Password: r.PostFormValue("password"),
+		}, nil
+	}
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -90,15 +123,22 @@ type changePasswordReq struct {
 	New     string `json:"new"`
 }
 
+// handleChangePassword accepts JSON (json-enc HTMX, fetch) or form
+// bodies; the form path also supports a `confirm` field for the
+// settings page.
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	username, _ := s.currentUser(r)
 	if username == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var req changePasswordReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	req, confirm, err := decodeChangePasswordRequest(r)
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if confirm != "" && confirm != req.New {
+		http.Error(w, "новый пароль и подтверждение не совпадают", http.StatusBadRequest)
 		return
 	}
 	if !s.opts.Credentials.Verify(username, req.Current) {
@@ -112,37 +152,26 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-const loginHTML = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<title>goloom admin · вход</title>
-<link rel="stylesheet" href="/static/style.css">
-<style>
-.login-wrap{display:flex;align-items:center;justify-content:center;min-height:80vh}
-.login-form{background:var(--panel);padding:24px;border-radius:8px;min-width:320px;border:1px solid #232938}
-.login-form h1{margin:0 0 16px;font-size:18px}
-.login-form .field{margin:10px 0}
-.login-form .field input{width:100%}
-.login-form button{width:100%;margin-top:12px}
-.login-form .err{color:var(--danger);font-size:12px;margin-top:8px;min-height:16px}
-</style>
-</head><body>
-<div class="login-wrap"><form class="login-form" id="loginForm">
-<h1>goloom admin</h1>
-<div class="field"><label>Логин</label><input id="username" autofocus value="admin" autocomplete="username"></div>
-<div class="field"><label>Пароль</label><input id="password" type="password" autocomplete="current-password"></div>
-<div class="err" id="err"></div>
-<button>Войти</button>
-</form></div>
-<script>
-document.getElementById("loginForm").addEventListener("submit",async function(e){
-  e.preventDefault();
-  var err=document.getElementById("err");err.textContent="";
-  try{
-    var r=await fetch("/login",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({username:document.getElementById("username").value,
-                           password:document.getElementById("password").value})});
-    if(r.ok){location="/";return}
-    err.textContent=r.status===401?"Неверный логин или пароль":(await r.text());
-  }catch(ex){err.textContent="Сетевая ошибка: "+ex.message}
-});
-</script>
-</body></html>`
+func decodeChangePasswordRequest(r *http.Request) (changePasswordReq, string, error) {
+	ct := r.Header.Get("Content-Type")
+	switch {
+	case strings.Contains(ct, "application/json"):
+		var req changePasswordReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return changePasswordReq{}, "", err
+		}
+		return req, "", nil
+	default:
+		if err := r.ParseForm(); err != nil {
+			return changePasswordReq{}, "", err
+		}
+		req := changePasswordReq{
+			Current: r.PostFormValue("current"),
+			New:     r.PostFormValue("new"),
+		}
+		if req.New == "" {
+			return req, "", errors.New("new password is required")
+		}
+		return req, r.PostFormValue("confirm"), nil
+	}
+}
