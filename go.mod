@@ -19,6 +19,7 @@ require (
 )
 
 require (
+	github.com/a-h/templ v0.3.1001 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/klauspost/reedsolomon v1.12.0 // indirect
