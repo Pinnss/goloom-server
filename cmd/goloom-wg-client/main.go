@@ -1,32 +1,42 @@
+// goloom-wg-client connects to a Goloom inbound and exposes a local
+// UDP listener for the system WireGuard userspace to dial. After the
+// upstream sfu/transport refactor this binary stays transport-agnostic:
+// it asks the [sfu] registry for whatever transport the connstr (or
+// YAML config) specifies, hands the resulting Session to a
+// [wgrelay.SFUBridge], and keeps the bridge alive across reconnects.
+//
+// For now connstr only carries Telemost meeting URLs, so the practical
+// result is identical to the pre-refactor client. WB Stream support
+// will land once we wire a long-lived credential bundle into connstr.
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Pinnss/goloom-server/internal/identity"
-	mediastubs "github.com/Pinnss/goloom-server/internal/media"
-	"github.com/Pinnss/goloom-server/internal/session"
+	"github.com/Pinnss/goloom-server/internal/sfu"
+
+	// Side-effect imports — register transports with the sfu registry.
+	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
+	telemost "github.com/Pinnss/goloom-server/internal/sfu/telemost"
+
 	"github.com/Pinnss/goloom-server/internal/tun"
-	"github.com/Pinnss/goloom-server/internal/tunnel"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
 // supervise runs the tunnel in a loop, restarting on peer-rehandshake
 // (server restart) immediately and on other errors with exponential
-// backoff. Owns the RouteManager so Telemost IP exclusions survive
-// across reconnects (otherwise the new run() can't reach the SFU
-// because WG's default route would have captured Telemost traffic).
+// backoff. Owns the RouteManager so SFU IP exclusions survive across
+// reconnects (otherwise the new run() can't reach the SFU because WG's
+// default route would have captured Telemost/LiveKit traffic).
 func supervise(ctx context.Context, cfg *Config, lg *log.Logger) {
 	rm := tun.NewRouteManager("", nil, 0, lg)
 	if err := rm.SaveOriginalState(); err != nil {
@@ -35,12 +45,21 @@ func supervise(ctx context.Context, cfg *Config, lg *log.Logger) {
 	}
 	defer rm.Restore()
 
-	if telemostIPs, err := resolveTelemostIPs(cfg.Meeting); err == nil {
-		lg.Printf("TELEMOST IPs to exclude (initial): %v", telemostIPs)
-		_ = rm.ExcludeIPs(telemostIPs)
-	} else {
-		lg.Printf("WARN initial Telemost IP resolve: %v", err)
+	// Pre-resolve the SFU's well-known hosts so we have *something* to
+	// exclude from the tunnel before the first Connect — otherwise our
+	// pion sockets get captured by our own WG default route and the
+	// bootstrap stalls. Dynamic ICE hosts get added after Connect via
+	// sfu.ICEHostsProvider.
+	if sfu.Kind(cfg.Transport) == sfu.KindTelemost || cfg.Transport == "" {
+		if ips, err := telemost.ResolveSFUIPs(cfg.Meeting); err == nil {
+			lg.Printf("TELEMOST IPs to exclude (initial): %v", ips)
+			_ = rm.ExcludeIPs(ips)
+		} else {
+			lg.Printf("WARN initial Telemost IP resolve: %v", err)
+		}
 	}
+	// LiveKit/WB Stream IPs are dynamic per-connection (returned in the
+	// connection-details response); we'll add them after Connect.
 
 	backoff := 5 * time.Second
 	for {
@@ -51,30 +70,28 @@ func supervise(ctx context.Context, cfg *Config, lg *log.Logger) {
 		}
 
 		retryAfter := backoff
-		if errors.Is(err, wgrelay.ErrPeerRehandshake) {
+		switch {
+		case errors.Is(err, sfu.ErrPeerRehandshake), errors.Is(err, wgrelay.ErrPeerRehandshake):
 			// Wait ~1s before reconnecting so the SFU finishes
 			// processing the WS bye + DTLS close from the old session
-			// and removes our peer slot. Without this delay the new
-			// session shows up alongside the old one for ICE-timeout
-			// duration (~30s), creating a "zombie" participant.
+			// and removes our peer slot.
 			lg.Printf("peer rehandshake — reconnecting in 1s (letting SFU release old peer slot)")
 			retryAfter = 1 * time.Second
 			backoff = 5 * time.Second
-		} else if errors.Is(err, wgrelay.ErrRxStall) {
+		case errors.Is(err, wgrelay.ErrRxStall):
 			// Watchdog detected media-track shaping. Same fast-retry
-			// strategy as a peer-rehandshake — old SFU session needs a
-			// brief moment to wind down before we rejoin, otherwise we
-			// can collide with our zombie subscription.
-			lg.Printf("rx stall — Telemost SFU likely shaped our tracks; reconnecting in 1s")
+			// strategy as a peer-rehandshake.
+			lg.Printf("rx stall — SFU likely shaped our tracks; reconnecting in 1s")
 			retryAfter = 1 * time.Second
 			backoff = 5 * time.Second
-		} else if err != nil {
+		case err != nil:
 			lg.Printf("session ended: %v — retrying in %s", err, backoff)
-		} else {
+		default:
 			lg.Printf("session ended cleanly — retrying in %s", backoff)
 		}
 
-		fastRetry := errors.Is(err, wgrelay.ErrPeerRehandshake) ||
+		fastRetry := errors.Is(err, sfu.ErrPeerRehandshake) ||
+			errors.Is(err, wgrelay.ErrPeerRehandshake) ||
 			errors.Is(err, wgrelay.ErrRxStall)
 
 		select {
@@ -123,10 +140,11 @@ func main() {
 	if *listenAddr != "" {
 		cfg.ListenAddr = *listenAddr
 	}
-	lg.Printf("config loaded: meeting=%s listen=%s", cfg.Meeting, cfg.ListenAddr)
+	lg.Printf("config loaded: transport=%s meeting=%s listen=%s",
+		cfg.Transport, cfg.Meeting, cfg.ListenAddr)
 
 	if !isAdmin() {
-		lg.Fatalf("goloom-wg-client must run as Administrator (route management for Telemost IP exclusion)")
+		lg.Fatalf("goloom-wg-client must run as Administrator (route management for SFU IP exclusion)")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -135,190 +153,91 @@ func main() {
 	supervise(ctx, cfg, lg)
 }
 
+// run executes a single tunnel attempt. Returns when the session ends
+// or the watchdog forces a reconnect. supervise() then decides how
+// fast to retry based on the returned error.
 func run(ctx context.Context, cfg *Config, lg *log.Logger, rm *tun.RouteManager) error {
-	displayName := identity.NameOrGenerate(cfg.DisplayName)
-	lg.Printf("display name: %s", displayName)
-	sess, err := session.SetupSession(ctx, lg, cfg.Meeting, displayName)
+	transport, err := sfu.Get(sfu.Kind(cfg.Transport))
 	if err != nil {
-		return fmt.Errorf("session setup: %w", err)
+		return err
+	}
+
+	connectSpec := buildConnectSpec(cfg, lg)
+	lg.Printf("connecting via transport=%s", connectSpec.Kind)
+
+	sess, err := transport.Connect(ctx, connectSpec)
+	if err != nil {
+		return err
 	}
 	defer sess.Close()
 
-	// ICE server IPs only become known after SetupSession completes —
-	// add them now (idempotent: RouteManager just logs duplicates).
-	if sess.ServerHello() != nil {
+	// Add dynamically-discovered ICE hosts to the route-exclusion set
+	// (TURN servers from serverHello / connection-details).
+	if hp, ok := sess.(sfu.ICEHostsProvider); ok {
 		var iceIPs []net.IP
-		for _, ice := range sess.ServerHello().RtcConfiguration.ICEServers {
-			for _, u := range ice.URLs {
-				if host := extractHost(u); host != "" {
-					if ips, err := net.LookupIP(host); err == nil {
-						iceIPs = append(iceIPs, ips...)
-					}
-				}
+		for _, host := range hp.ICEHosts() {
+			ips, err := net.LookupIP(host)
+			if err != nil {
+				continue
 			}
+			iceIPs = append(iceIPs, ips...)
 		}
 		if len(iceIPs) > 0 {
 			_ = rm.ExcludeIPs(iceIPs)
 		}
 	}
 
-	go session.RunOpusSilenceLoop(ctx, lg, sess.AudioTrack)
-	go session.RunKeyframeRefresh(ctx, lg, sess.VideoTrack)
-	if err := session.SendInitialKeyframes(lg, sess.VideoTrack, 10); err != nil {
-		return fmt.Errorf("camera keyframe warmup: %w", err)
-	}
-	lg.Printf("WARMUP camera keyframe done")
+	// Bridge the Session ↔ local UDP socket the WireGuard userspace
+	// dials. runCtx lets the watchdog forcibly tear down a stalled
+	// session without taking down the whole supervise loop.
+	bridge := wgrelay.NewClientBridge(cfg.ListenAddr, sess, lg)
 
-	merged := make(chan tunnel.ReceivedFrame, 512)
-	go func() {
-		idx := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case tr, ok := <-sess.NewVideoTracks():
-				if !ok {
-					return
-				}
-				idx++
-				lg.Printf("RECV spawning receiver #%d for track id=%s", idx, tr.ID())
-				r := tunnel.NewReceiver(256)
-				go r.Run(ctx, tr, lg)
-				go func(i int, recv *tunnel.Receiver) {
-					for f := range recv.Frames() {
-						select {
-						case merged <- f:
-						case <-ctx.Done():
-							return
-						}
-					}
-				}(idx, r)
-			}
-		}
-	}()
-
-	lg.Printf("WAIT waiting for server peer...")
-	if _, err := sess.WaitForPeer(ctx, 5*time.Minute); err != nil {
-		return fmt.Errorf("wait for peer: %w", err)
-	}
-	lg.Printf("WAIT peer detected, starting handshake")
-
-	cameraSender := tunnel.NewSender(sess.VideoTrack)
-	cameraSender.VP8Wrap = true
-	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
-	cameraSender.Start()
-	defer cameraSender.Close()
-
-	peerID, err := session.Handshake(ctx, lg, sess, cameraSender, merged, 1)
-	if err != nil {
-		return fmt.Errorf("handshake: %w", err)
-	}
-	lg.Printf("HANDSHAKE ✓ peer=%s", peerID)
-
-	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, lg, 100*time.Millisecond)
-	session.StartRTCPLoop(ctx, lg, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI)
-
-	go func() {
-		for i, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-				sess.RebindSlots(ctx, 4+i)
-			}
-		}
-	}()
-
-	dt := wgrelay.New(cameraSender, merged, lg)
-	joiner := wgrelay.NewJoiner(cfg.ListenAddr, dt, lg)
-
-	// runCtx — derived от outer ctx, чтобы watchdog мог принудительно
-	// прибить именно текущую попытку tunnel'я, не убивая весь supervise().
-	// При нормальном завершении joiner.Run возвращается, defer cancel
-	// гасит и watchdog, и dt.Run.
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
-	go dt.Run(runCtx)
-	go wgrelay.RunRxStallWatchdogDefault(runCtx, runCancel, dt, lg)
+	go bridge.RunRxStallWatchdog(runCtx, runCancel, lg, 30*time.Second, 2*time.Minute)
 
 	lg.Printf("✓ goloom-wg-client ready — now activate your WireGuard tunnel")
 	lg.Printf("  WG should point Endpoint at %s", cfg.ListenAddr)
 
-	err = joiner.Run(runCtx)
+	bridgeErr := bridge.Run(runCtx)
 
-	// Watchdog мог сорваться раньше joiner.Run, тогда runCtx уже cancelled
-	// и joiner вернёт ctx.Err(). Превращаем это в специфичный ErrRxStall
-	// чтобы supervise() выбрал быстрый retry (а не общий exponential
-	// backoff как при unknown crash).
-	if dt.WasRxStalled() {
+	if bridge.Stalled() {
 		return wgrelay.ErrRxStall
 	}
-	if errors.Is(err, wgrelay.ErrPeerRehandshake) {
-		return err // surface up to supervise() for fast retry
+	if errors.Is(bridgeErr, sfu.ErrPeerRehandshake) {
+		return bridgeErr
 	}
-	if err != nil && !errors.Is(err, wgrelay.ErrTunnelClosed) {
-		return fmt.Errorf("joiner: %w", err)
+	if bridgeErr != nil && !errors.Is(bridgeErr, wgrelay.ErrTunnelClosed) {
+		return bridgeErr
 	}
 	return nil
 }
 
-
-func resolveTelemostIPs(meetingURL string) ([]net.IP, error) {
-	var allIPs []net.IP
-	hosts := []string{
-		"cloud-api.yandex.ru",
-		"telemost.yandex.ru",
+// buildConnectSpec maps the loaded YAML/connstr Config onto an
+// sfu.ConnectSpec. Empty Transport defaults to Telemost for backward
+// compatibility with old connstrings/configs.
+func buildConnectSpec(cfg *Config, lg *log.Logger) sfu.ConnectSpec {
+	kind := sfu.Kind(cfg.Transport)
+	if kind == "" {
+		kind = sfu.KindTelemost
 	}
-
-	u, err := url.Parse(meetingURL)
-	if err == nil && u.Host != "" && u.Host != "telemost.yandex.ru" {
-		hosts = append(hosts, u.Host)
+	cs := sfu.ConnectSpec{
+		Kind:        kind,
+		DisplayName: identity.NameOrGenerate(cfg.DisplayName),
+		Logger:      lg,
 	}
-
-	sfuHosts := []string{
-		"goloom.strm.yandex.net",
-		"strm.yandex.net",
-	}
-	hosts = append(hosts, sfuHosts...)
-
-	for _, host := range hosts {
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			continue
-		}
-		allIPs = append(allIPs, ips...)
-	}
-
-	if len(allIPs) == 0 {
-		return nil, fmt.Errorf("no IPs resolved for Telemost hosts")
-	}
-	return allIPs, nil
-}
-
-func extractHost(rawURL string) string {
-	for _, prefix := range []string{"turn:", "turns:", "stun:", "stuns:"} {
-		if strings.HasPrefix(rawURL, prefix) {
-			rest := rawURL[len(prefix):]
-			if idx := strings.Index(rest, "?"); idx >= 0 {
-				rest = rest[:idx]
-			}
-			host, _, err := net.SplitHostPort(rest)
-			if err == nil && host != "" {
-				return host
-			}
-			return rest
+	switch kind {
+	case sfu.KindTelemost:
+		cs.Telemost = &sfu.TelemostConnect{MeetingURL: cfg.Meeting}
+	case sfu.KindLiveKitWBStream:
+		cs.LiveKitWBStream = &sfu.LiveKitWBStreamConnect{
+			RoomURL:     cfg.LiveKitRoomURL,
+			AccessToken: cfg.LiveKitAccessToken,
+			Cookies:     cfg.LiveKitCookies,
 		}
 	}
-
-	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
-		host, _, _ := net.SplitHostPort(u.Host)
-		if host != "" {
-			return host
-		}
-		return u.Host
-	}
-	return ""
+	return cs
 }
 
 func isAdmin() bool {

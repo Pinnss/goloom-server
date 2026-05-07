@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"sync"
 	"time"
 
@@ -24,6 +25,15 @@ import (
 	"github.com/Pinnss/goloom-server/internal/tunnel"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
+
+// urlParse is a thin wrapper exposed so Session.ICEHosts can use it
+// without dragging net/url into method-receiver scope. (Go doesn't let
+// us use the std-lib name as a method dependency directly.)
+var urlParse = url.Parse
+
+// Compile-time interface assertion — fails the build if Session no
+// longer implements ICEHostsProvider.
+var _ sfu.ICEHostsProvider = (*Session)(nil)
 
 // Transport implements [sfu.Transport] for Telemost.
 type Transport struct{}
@@ -115,6 +125,7 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 		cameraSender: cameraSender,
 		sess:         sess,
 		logger:       lg,
+		meetingURL:   spec.Telemost.MeetingURL,
 		incoming:     make(chan []byte, 512),
 		done:         make(chan struct{}),
 	}
@@ -160,11 +171,16 @@ func pumpVideoTracks(ctx context.Context, lg *log.Logger, sess *session.Session,
 }
 
 // Session implements [sfu.Session] over the legacy Telemost stack.
+//
+// Also implements [sfu.ICEHostsProvider] — clients use this to populate
+// route-exclusion lists so their own WG default-route doesn't swallow
+// the very pion sockets we're using to talk to Telemost.
 type Session struct {
 	dt           *wgrelay.DataTunnel
 	cameraSender *tunnel.Sender
 	sess         *session.Session
 	logger       *log.Logger
+	meetingURL   string
 
 	incoming chan []byte
 
@@ -196,6 +212,50 @@ func (s *Session) Err() error {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
 	return s.err
+}
+
+// ICEHosts returns the union of well-known Telemost service hosts and
+// the dynamically-advertised ICE/TURN/STUN servers from serverHello.
+//
+// Implements [sfu.ICEHostsProvider]. Returns deduplicated hostnames
+// without scheme/port.
+func (s *Session) ICEHosts() []string {
+	hosts := make(map[string]struct{})
+
+	// Static hosts (always needed for the bootstrap HTTP /connection
+	// + websocket dial, which happen before serverHello arrives).
+	for _, h := range []string{
+		"cloud-api.yandex.ru",
+		"telemost.yandex.ru",
+		"goloom.strm.yandex.net",
+		"strm.yandex.net",
+	} {
+		hosts[h] = struct{}{}
+	}
+
+	// Meeting URL host (rarely differs from telemost.yandex.ru, but
+	// staging links sometimes do).
+	if u, err := urlParse(s.meetingURL); err == nil && u.Host != "" {
+		hosts[u.Host] = struct{}{}
+	}
+
+	// Dynamically-discovered TURN/STUN — only available once
+	// serverHello has been received during SetupSession.
+	if hello := s.sess.ServerHello(); hello != nil {
+		for _, ice := range hello.RtcConfiguration.ICEServers {
+			for _, raw := range ice.URLs {
+				if h := ExtractICEHost(raw); h != "" {
+					hosts[h] = struct{}{}
+				}
+			}
+		}
+	}
+
+	out := make([]string, 0, len(hosts))
+	for h := range hosts {
+		out = append(out, h)
+	}
+	return out
 }
 
 func (s *Session) Close() error {

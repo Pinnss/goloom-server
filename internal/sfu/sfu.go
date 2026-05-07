@@ -195,6 +195,25 @@ var ErrSessionClosed = errors.New("sfu: session closed")
 // surface it directly.
 var ErrPeerRehandshake = errors.New("sfu: peer initiated re-handshake")
 
+// ICEHostsProvider is an optional interface a Session may implement
+// when its underlying transport exposes the set of ICE/TURN/STUN hosts
+// that the client should exclude from its default-route capture.
+//
+// Telemost transports populate this from serverHello.RtcConfiguration
+// after Connect; LiveKit transports return the iceServers from the
+// connection-details response. Other transports may return an empty
+// slice if they don't have a meaningful list (or use a fixed
+// well-known endpoint outside the tunnel anyway).
+//
+// Clients use this to set up VpnService/route exclusions so Pion's
+// outbound sockets aren't captured by their own WG tunnel.
+type ICEHostsProvider interface {
+	// ICEHosts returns hostnames (no scheme/port) of all signalling
+	// and TURN/STUN endpoints whose traffic must bypass the tunnel.
+	// May return nil if the session hasn't completed handshake yet.
+	ICEHosts() []string
+}
+
 // ─── registry ───────────────────────────────────────────────────────
 
 var (

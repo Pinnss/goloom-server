@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Pinnss/goloom-server/internal/sfu"
 )
@@ -38,6 +39,9 @@ type SFUBridge struct {
 	TxBytes   atomic.Uint64
 	RxPackets atomic.Uint64
 	RxBytes   atomic.Uint64
+
+	// stalled is set by [RunRxStallWatchdog] when it forces a cancel.
+	stalled atomic.Bool
 }
 
 type bridgeMode int
@@ -207,4 +211,82 @@ func (b *SFUBridge) close() {
 			b.udp.Close()
 		}
 	})
+}
+
+// RunRxStallWatchdog watches the RxBytes counter on the bridge and
+// fires `cancel()` if the counter doesn't advance for `rxStallTimeout`
+// after handshake (first non-zero rx). Mirrors the legacy DataTunnel
+// watchdog but operates on SFUBridge stats so it works for any
+// transport.
+//
+// Tick / timeout defaults match RunRxStallWatchdogDefault for the
+// legacy path: 30 sec tick, 2 minute stall timeout.
+//
+// Caller is expected to wrap the bridge's Run in a derived ctx —
+// when cancel() fires the bridge unwinds, Run returns, and the
+// supervise loop restarts. ErrRxStall is exposed via Stalled()
+// for callers who want to distinguish stall from a clean cancel.
+func (b *SFUBridge) RunRxStallWatchdog(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	logger *log.Logger,
+	tick time.Duration,
+	rxStallTimeout time.Duration,
+) {
+	if tick <= 0 {
+		tick = 30 * time.Second
+	}
+	if rxStallTimeout <= 0 {
+		rxStallTimeout = 2 * time.Minute
+	}
+
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var (
+		lastRx     uint64
+		lastChange = time.Now()
+		wasReady   bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rx := b.RxBytes.Load()
+			ready := rx > 0
+			if !ready {
+				lastRx = 0
+				lastChange = time.Now()
+				wasReady = false
+				continue
+			}
+			if !wasReady {
+				wasReady = true
+				lastRx = rx
+				lastChange = time.Now()
+				continue
+			}
+			if rx != lastRx {
+				lastRx = rx
+				lastChange = time.Now()
+				continue
+			}
+			if time.Since(lastChange) > rxStallTimeout {
+				if logger != nil {
+					logger.Printf("WG-BRIDGE WATCHDOG no rx for %s after handshake — forcing reconnect", rxStallTimeout)
+				}
+				b.stalled.Store(true)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// Stalled reports whether the rx-stall watchdog fired during the
+// bridge's lifetime. Read after Run returns to distinguish stall from
+// a clean cancel / context done.
+func (b *SFUBridge) Stalled() bool {
+	return b.stalled.Load()
 }
