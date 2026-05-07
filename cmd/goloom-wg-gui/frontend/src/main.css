@@ -218,7 +218,29 @@ main {
 .log .info  { color: #cbd5e1; }
 .log .warn  { color: var(--warn); }
 .log .error { color: var(--danger); }
+.log .trace { color: #5b6371; } /* dim — visible only when toggle is on */
 .log .ts    { color: var(--muted); margin-right: 4px; }
+
+/* When toggle is off (default), trace lines hide. We also hide their
+   timestamp ancestor so the layout doesn't gap. */
+.log.log-hide-trace .line.trace { display: none; }
+
+.log-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--muted);
+    user-select: none;
+}
+.toggle input { accent-color: var(--accent); cursor: pointer; }
 
 /* Custom scrollbars to fit the dark theme. */
 .log::-webkit-scrollbar { width: 8px; height: 8px; }

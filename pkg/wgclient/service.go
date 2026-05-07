@@ -520,14 +520,63 @@ func (s *Service) broadcast(ev Event) {
 	}
 }
 
+// classifyLogLevel labels a captured line by severity.
+//
+// "trace" is reserved for high-volume diagnostic output that's
+// useful for SFU debugging but unhelpful at the operator level
+// (RTCP SR per packet, slot rebind scans, raw SDP attribute lines,
+// per-Nth WG-bridge packet counters). The GUI hides trace by
+// default; the CLI shows everything because operators run it for
+// diagnostics anyway.
+//
+// The detection is deliberately conservative — we only down-rank
+// patterns we've explicitly seen contribute the bulk of the spam.
+// New noise sources should be added here once observed.
 func classifyLogLevel(text string) string {
 	upper := strings.ToUpper(text)
+
 	switch {
 	case strings.Contains(upper, "FATAL"), strings.Contains(upper, "ERROR"), strings.Contains(upper, " ERR "):
 		return "error"
 	case strings.Contains(upper, "WARN"):
 		return "warn"
-	default:
-		return "info"
 	}
+
+	if isTraceNoise(text) {
+		return "trace"
+	}
+	return "info"
+}
+
+// isTraceNoise returns true for lines that shouldn't show up in the
+// operator's log pane by default. Match against the message body
+// stripped of the leading "[goloom-wg] DATE TIME" prefix added by
+// the standard log.Logger — but we don't bother stripping; the
+// patterns are anchored on tokens unique to the noisy categories.
+func isTraceNoise(text string) bool {
+	// SubscriberMaster slot scan: "slot[12] empty/other raw=..."
+	if strings.Contains(text, " slot[") &&
+		(strings.Contains(text, "empty/other") || strings.Contains(text, " empty/")) {
+		return true
+	}
+	// Periodic RTCP SR/RR blasts:
+	//   "PUB-rtcp[ef09f86a] SR ssrc=4006457592 packets=42 octets=1049"
+	//   "SUB-rtcp[...] SR ssrc=..."
+	if (strings.Contains(text, "PUB-rtcp[") || strings.Contains(text, "SUB-rtcp[")) &&
+		(strings.Contains(text, " SR ") || strings.Contains(text, " RR ")) {
+		return true
+	}
+	// WG bridge packet counters: "WG-BRIDGE ↑ pkt #123 ..." (every 200th)
+	if strings.Contains(text, "WG-BRIDGE") && strings.Contains(text, " pkt #") {
+		return true
+	}
+	// Raw SDP / signalling dumps occasionally make it through —
+	// "a=...", "v=...", "m=...". Recognise by an "=" within the
+	// first 3 chars and no spaces before it (SDP is single-letter k=v).
+	if len(text) > 2 && text[1] == '=' &&
+		(text[0] == 'a' || text[0] == 'v' || text[0] == 'o' || text[0] == 's' ||
+			text[0] == 'c' || text[0] == 't' || text[0] == 'm') {
+		return true
+	}
+	return false
 }

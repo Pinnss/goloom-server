@@ -54,9 +54,15 @@
     <section class="card log-card">
         <div class="log-head">
             <h2>Лог</h2>
-            <button id="btn-clear-log" class="btn btn-ghost btn-xs">Очистить</button>
+            <div class="log-tools">
+                <label class="toggle">
+                    <input type="checkbox" id="chk-trace"/>
+                    <span>trace</span>
+                </label>
+                <button id="btn-clear-log" class="btn btn-ghost btn-xs">Очистить</button>
+            </div>
         </div>
-        <div id="log" class="log"></div>
+        <div id="log" class="log log-hide-trace"></div>
     </section>
 </main>
 

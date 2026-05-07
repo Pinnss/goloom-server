@@ -12,6 +12,7 @@ const els = {
     btnConn:   document.getElementById('btn-connect'),
     btnDisc:   document.getElementById('btn-disconnect'),
     btnClear:  document.getElementById('btn-clear-log'),
+    chkTrace:  document.getElementById('chk-trace'),
     error:     document.getElementById('error'),
     phase:     document.getElementById('phase-chip'),
     sTrans:    document.getElementById('s-transport'),
@@ -126,6 +127,9 @@ function boot() {
     els.btnConn.addEventListener('click', doConnect);
     els.btnDisc.addEventListener('click', doDisconnect);
     els.btnClear.addEventListener('click', () => { els.log.replaceChildren(); });
+    els.chkTrace.addEventListener('change', () => {
+        els.log.classList.toggle('log-hide-trace', !els.chkTrace.checked);
+    });
 
     // Submit on Ctrl+Enter inside the connstr field.
     els.connstr.addEventListener('keydown', (e) => {
