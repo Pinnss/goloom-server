@@ -120,7 +120,14 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 	// wireguard-go has its own logger using its severity levels;
 	// route through ours so trace stays filtered. LogLevelError
 	// keeps the chatter down — we get only real failures.
-	bind := conn.NewDefaultBind()
+	// IMPORTANT: NewStdNetBind, not NewDefaultBind. The Default on
+	// Windows is WinRingBind which uses Registered I/O — it doesn't
+	// receive packets sent over the loopback adapter, so when our
+	// bridge replies on 127.0.0.1, wireguard-go's socket silently
+	// drops them. Bridge counters show tx_to_wg climbing while WG
+	// rx stays 0 forever. StdNetBind uses a plain net.UDPConn that
+	// receives loopback UDP normally.
+	bind := conn.NewStdNetBind()
 	// wireguard-go verbose lines go through our trace classifier so
 	// they're hidden by default but available via the GUI's "trace"
 	// toggle. Errors stay surfaced as warnings.
