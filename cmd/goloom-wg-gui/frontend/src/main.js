@@ -45,6 +45,7 @@ const els = {
     plkToken:       document.getElementById('pf-lk-token'),
     plkCookies:     document.getElementById('pf-lk-cookies'),
     plisten:        document.getElementById('pf-listen'),
+    pAutoWG:        document.getElementById('pf-autowg'),
     pSaveBtn:       document.getElementById('btn-profile-save'),
     pError:         document.getElementById('profile-dialog-error'),
 
@@ -215,6 +216,11 @@ function openProfileDialog(profile) {
     els.plkToken.value   = cfg.livekit_access_token || '';
     els.plkCookies.value = cfg.livekit_cookies      || '';
     els.plisten.value    = cfg.listen_addr          || '';
+    // AutoWG defaults to ON for new profiles. For edit mode we
+    // reflect the saved value — the backend gates by whether the
+    // embedded WG keys exist, so flipping this on for a manual-
+    // entry profile that lacks keys silently has no effect.
+    els.pAutoWG.checked = profile ? !!cfg.auto_wg : true;
     refreshManualTransportFields();
     setActiveTab(profile ? 'manual' : 'connstr');
 
@@ -265,8 +271,14 @@ async function saveProfileFromDialog() {
                 els.pError.textContent = 'Для редактирования используй вкладку «Вручную».';
                 return;
             }
-            saved = await window.go.main.App.ImportProfile(cs, name);
+            saved = await window.go.main.App.ImportProfile(cs, name, !!els.pAutoWG.checked);
         } else {
+            // Manual mode preserves the existing WG block (when
+            // editing a connstr-imported profile) so toggling
+            // AutoWG without re-pasting still works.
+            const existing = editingProfileId
+                ? (profiles.find((p) => p.id === editingProfileId) || {}).config || {}
+                : {};
             const cfg = {
                 transport: els.ptransport.value,
                 meeting: (els.pmeeting.value || '').trim(),
@@ -275,6 +287,8 @@ async function saveProfileFromDialog() {
                 livekit_cookies:      (els.plkCookies.value || '').trim(),
                 display_name: '',
                 listen_addr: (els.plisten.value || '').trim(),
+                auto_wg: !!els.pAutoWG.checked,
+                wg: existing.wg || {},
             };
             saved = await window.go.main.App.SaveProfile(editingProfileId || '', name, cfg);
         }

@@ -121,6 +121,12 @@
                    placeholder="127.0.0.1:51820"/>
         </div>
 
+        <label class="checkbox-row">
+            <input id="pf-autowg" type="checkbox" checked/>
+            <span>Поднимать WG-туннель автоматически</span>
+            <span class="muted-block hint">встраивает wintun + wireguard-go в процесс — отдельное приложение WireGuard не нужно</span>
+        </label>
+
         <span id="profile-dialog-error" class="err"></span>
         <div class="row modal-actions">
             <button id="btn-profile-save" class="btn btn-primary" type="button">Сохранить</button>

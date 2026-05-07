@@ -115,11 +115,44 @@ type Config struct {
 	LiveKitCookies     string `json:"livekit_cookies"`
 	DisplayName        string `json:"display_name"`
 	ListenAddr         string `json:"listen_addr"` // default 127.0.0.1:51820
+
+	// AutoWG, when true and WG is populated, makes the service bring
+	// up a wintun adapter and run a wireguard-go userspace tunnel
+	// itself instead of expecting an external WireGuard for Windows
+	// install to dial 127.0.0.1:51820. Implemented on Windows only.
+	AutoWG bool `json:"auto_wg"`
+
+	// WG carries the per-client WireGuard parameters that the admin
+	// panel embeds in a connstr. Used only when AutoWG is on; the
+	// classic flow still works without these because the user's own
+	// WG client knows the keys via the wg.conf they downloaded.
+	WG WGParams `json:"wg"`
+}
+
+// WGParams is the embedded WireGuard config for the auto-WG path.
+// Field names match the connstr schema in internal/connstr.
+type WGParams struct {
+	ClientPrivateKey string   `json:"client_private_key"` // base64
+	ServerPublicKey  string   `json:"server_public_key"`  // base64
+	ClientAddr       string   `json:"client_addr"`        // CIDR like 10.66.1.2/24
+	Endpoint         string   `json:"endpoint"`           // typically same as ListenAddr
+	DNS              []string `json:"dns,omitempty"`      // ["1.1.1.1","8.8.8.8"]
+}
+
+// Valid reports whether enough fields are populated to bring up an
+// auto-WG tunnel. Endpoint is allowed to be empty — Service.Start
+// fills it from cfg.ListenAddr in that case.
+func (w WGParams) Valid() bool {
+	return w.ClientPrivateKey != "" && w.ServerPublicKey != "" && w.ClientAddr != ""
 }
 
 // FromConnStr decodes a goloom:// connection string into a [Config].
 // Only Telemost connstrings are supported today; WB-Stream credentials
 // arrive via the admin webview-auth flow, not the connstr.
+//
+// If the connstr embeds WG client params (admin panel's auto-provision
+// flow), they're carried into Config.WG so the GUI can offer auto-WG
+// without requiring a separate wg.conf import.
 func FromConnStr(s string) (Config, error) {
 	p, err := connstr.Decode(s)
 	if err != nil {
@@ -130,6 +163,21 @@ func FromConnStr(s string) (Config, error) {
 		Meeting:     p.Meeting,
 		DisplayName: p.DisplayName,
 		ListenAddr:  "127.0.0.1:51820",
+	}
+	if p.HasWG() {
+		cfg.WG = WGParams{
+			ClientPrivateKey: p.WGClientPrivate,
+			ServerPublicKey:  p.WGServerPublic,
+			ClientAddr:       p.WGClientAddr,
+			Endpoint:         p.WGEndpoint,
+		}
+		if p.WGDNS != "" {
+			for _, s := range strings.Split(p.WGDNS, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					cfg.WG.DNS = append(cfg.WG.DNS, s)
+				}
+			}
+		}
 	}
 	return cfg, nil
 }
@@ -334,7 +382,7 @@ func (s *Service) Verbose() bool { return s.verbose.Load() }
 // loop, with status reporting hooks.
 func (s *Service) supervise(ctx context.Context, cfg Config) {
 	lg := s.logger
-	rm := tun.NewRouteManager("", nil, 0, lg)
+	rm := tun.NewRouteManager(lg)
 	if err := rm.SaveOriginalState(); err != nil {
 		s.fatalf("save routes: %v", err)
 		return
@@ -350,6 +398,29 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 		} else {
 			lg.Printf("WARN initial Telemost IP resolve: %v", err)
 		}
+	}
+
+	// Optional auto-WG: bring up wintun + wireguard-go in-process
+	// before the SFU run loop. The tunnel survives SFU rehandshakes
+	// because wgrelay re-binds 127.0.0.1:51820 on each runOnce; the
+	// WG userspace just retries handshakes during the brief window.
+	//
+	// On failure we abort supervise rather than silently falling
+	// back — the user picked AutoWG explicitly and a half-config
+	// where SFU is up but the tunnel isn't would be confusing.
+	var aw *autoWG
+	if cfg.AutoWG {
+		if !cfg.WG.Valid() {
+			s.fatalf("auto-WG requested but WGParams incomplete (need keys + client_addr from connstr)")
+			return
+		}
+		got, err := startAutoWG(ctx, lg, cfg.WG, cfg.ListenAddr, rm)
+		if err != nil {
+			s.fatalf("auto-WG: %v", err)
+			return
+		}
+		aw = got
+		defer aw.Stop()
 	}
 
 	backoff := 5 * time.Second

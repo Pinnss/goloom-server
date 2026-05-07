@@ -191,8 +191,12 @@ func (a *App) ActiveProfileID() string {
 
 // ImportProfile parses a connstr, saves it as a new profile, and
 // returns the persisted record. If name is empty, a default is
-// inferred from the decoded transport + meeting URL.
-func (a *App) ImportProfile(connstr, name string) (Profile, error) {
+// inferred from the decoded transport + meeting URL. autoWG is
+// stored on the profile so launching it brings up the wintun
+// tunnel automatically (only effective if the connstr embedded
+// the WG client config — wb-stream connstrs that ship without
+// WG keys silently keep AutoWG off).
+func (a *App) ImportProfile(connstr, name string, autoWG bool) (Profile, error) {
 	if a.profiles == nil {
 		return Profile{}, errors.New("profile store unavailable")
 	}
@@ -200,6 +204,7 @@ func (a *App) ImportProfile(connstr, name string) (Profile, error) {
 	if err != nil {
 		return Profile{}, fmt.Errorf("decode connstr: %w", err)
 	}
+	cfg.AutoWG = autoWG && cfg.WG.Valid()
 	return a.profiles.Add(name, cfg)
 }
 

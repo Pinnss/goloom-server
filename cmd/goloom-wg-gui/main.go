@@ -25,6 +25,14 @@ import (
 var assets embed.FS
 
 func main() {
+	// Drop wintun.dll next to the .exe so the auto-WG path can find
+	// it. The function is no-op on non-Windows builds (build tag).
+	// We surface errors as a startup print + continue — the GUI is
+	// still useful without auto-WG (operator can run external WG).
+	if err := ensureWintunDLL(); err != nil {
+		println("warn: wintun.dll extraction failed:", err.Error())
+	}
+
 	app := NewApp()
 
 	err := wails.Run(&options.App{

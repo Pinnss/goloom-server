@@ -25,9 +25,6 @@ func hiddenCmd(name string, args ...string) *exec.Cmd {
 }
 
 type RouteManager struct {
-	tunName     string
-	tunGateway  net.IP
-	tunIfIndex  int
 	origGateway string
 	origIfIndex string
 	logger      *log.Logger
@@ -43,13 +40,15 @@ type addedRoute struct {
 	ifIndex int
 }
 
-func NewRouteManager(tunName string, tunGateway net.IP, tunIfIndex int, lg *log.Logger) *RouteManager {
-	return &RouteManager{
-		tunName:    tunName,
-		tunGateway: tunGateway,
-		tunIfIndex: tunIfIndex,
-		logger:     lg,
-	}
+// NewRouteManager constructs an empty route manager. Call
+// SaveOriginalState before any Exclude* / SetDefaultRoute call so we
+// know the upstream gateway to send excluded traffic through.
+//
+// The TUN-side gateway and ifIndex used to route the tunnel default
+// pass to SetDefaultRoute as arguments — they aren't known at
+// construction time (the wintun adapter is created later).
+func NewRouteManager(lg *log.Logger) *RouteManager {
+	return &RouteManager{logger: lg}
 }
 
 func (rm *RouteManager) SaveOriginalState() error {
@@ -100,15 +99,21 @@ func (rm *RouteManager) ExcludeCIDRs(cidrs []string) error {
 	return nil
 }
 
-func (rm *RouteManager) SetDefaultRoute() error {
-	gw := rm.tunGateway.String()
-	if err := rm.addRouteIF("0.0.0.0", "128.0.0.0", gw, rm.tunIfIndex); err != nil {
+// SetDefaultRoute installs a /1-pair (0.0.0.0/1 + 128.0.0.0/1) via
+// the TUN's gateway. Choosing two halves of the address space rather
+// than 0.0.0.0/0 lets the original default route stay in place — its
+// /0 is dominated by the more-specific /1 routes for tunnel traffic,
+// while excluded IPs (added by ExcludeIPs) keep going via the
+// upstream gateway through their /32 routes.
+func (rm *RouteManager) SetDefaultRoute(tunGateway net.IP, tunIfIndex int) error {
+	gw := tunGateway.String()
+	if err := rm.addRouteIF("0.0.0.0", "128.0.0.0", gw, tunIfIndex); err != nil {
 		return fmt.Errorf("add 0.0.0.0/1: %w", err)
 	}
-	if err := rm.addRouteIF("128.0.0.0", "128.0.0.0", gw, rm.tunIfIndex); err != nil {
+	if err := rm.addRouteIF("128.0.0.0", "128.0.0.0", gw, tunIfIndex); err != nil {
 		return fmt.Errorf("add 128.0.0.0/1: %w", err)
 	}
-	rm.logger.Printf("ROUTES default route set via TUN gateway %s IF %d", gw, rm.tunIfIndex)
+	rm.logger.Printf("ROUTES default route set via TUN gateway %s IF %d", gw, tunIfIndex)
 	return nil
 }
 
