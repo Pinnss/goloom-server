@@ -2,8 +2,13 @@
 # so we don't accidentally hide cmd/goloom-wg-server/ etc.
 /goloom-wg-server
 /goloom-wg-server.exe
+/goloom-wg-server-linux
 /goloom-wg-client
 /goloom-wg-client.exe
+
+# Local benchmarking / profiling scratchpad — VPS-side scripts and
+# captured traces that aren't part of the shipped product.
+/bench-tools/
 
 # Standalone Tailwind CLI binary, downloaded by `make tools-tailwind`.
 # Stays per-developer because it's ~40MB and OS-specific.
