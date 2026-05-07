@@ -19,6 +19,16 @@ type Spec struct {
 	Meeting     string `yaml:"meeting" json:"meeting"`
 	DisplayName string `yaml:"display_name" json:"display_name"`
 
+	// Transport selects the SFU/transport implementation to use.
+	// Empty string is treated as "telemost" for backward compatibility
+	// with pre-multi-transport configs. Valid values come from
+	// [github.com/Pinnss/goloom-server/internal/sfu].Kind.
+	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"`
+
+	// LiveKit holds extra credentials for transport=livekit-wb-stream.
+	// Populated by the admin webview-auth flow; ignored otherwise.
+	LiveKit *LiveKitSpec `yaml:"livekit,omitempty" json:"livekit,omitempty"`
+
 	// WGEndpoint is the local UDP address the relay forwards decrypted
 	// tunnel frames to (typically 127.0.0.1:51820 for wg0, +1 for wg1, etc.).
 	WGEndpoint string `yaml:"wg_endpoint" json:"wg_endpoint"`
@@ -43,6 +53,34 @@ type Spec struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 
 	CreatedAt time.Time `yaml:"created_at" json:"created_at"`
+}
+
+// LiveKitSpec stores the long-lived credentials needed to mint
+// short-lived LiveKit roomTokens at Connect time. Captured by the
+// admin webview-auth flow; cookies expire roughly every 14 days at
+// which point the operator must re-auth in the admin UI.
+//
+// Mirror of [github.com/Pinnss/goloom-server/internal/sfu].LiveKitWBStreamConnect
+// with persistence-friendly tags.
+type LiveKitSpec struct {
+	// RoomURL — public room link, e.g. https://stream.wb.ru/room/<id>.
+	RoomURL string `yaml:"room_url" json:"room_url"`
+
+	// AccessToken — guest user's long-lived JWT extracted from
+	// localStorage.wb_auth_auth_slice.accessToken in the webview.
+	// Persisted because re-issuing it requires another webview pass
+	// through Cloudflare.
+	AccessToken string `yaml:"access_token" json:"-"`
+
+	// Cookies — joined Cookie header containing _wbafp / x_wbaas_token
+	// / _wbauid. These are what Cloudflare actually checks; expiry is
+	// about 14 days for x_wbaas_token, 1 year for _wbauid.
+	Cookies string `yaml:"cookies" json:"-"`
+
+	// CookiesExpireAt — earliest expiry among the captured cookies.
+	// Admin UI surfaces this so operators can re-auth before runs go
+	// dark. RFC3339-formatted in JSON.
+	CookiesExpireAt time.Time `yaml:"cookies_expire_at,omitempty" json:"cookies_expire_at,omitempty"`
 }
 
 // Status is the live snapshot the admin panel renders. Not persisted.

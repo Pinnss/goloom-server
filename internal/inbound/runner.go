@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -9,16 +10,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Pinnss/goloom-server/internal/identity"
-	mediastubs "github.com/Pinnss/goloom-server/internal/media"
-	"github.com/Pinnss/goloom-server/internal/session"
-	"github.com/Pinnss/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/sfu"
+
+	// Side-effect imports — register Telemost and LiveKit Transports
+	// with the sfu factory. Pulled in here so cmd/goloom-wg-server doesn't
+	// have to know about every transport package.
+	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
+	_ "github.com/Pinnss/goloom-server/internal/sfu/telemost"
+
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
 // isLikelyEmptyRoom recognises the handshake-timeout-with-no-peer error
 // shape ("peerID=\"\" gotHello=false …") so the supervisor can treat it
-// as "waiting" instead of a hard error in the admin panel.
+// as "waiting" instead of a hard error in the admin panel. Telemost-
+// specific signal but harmless to check on other transports (won't match).
 func isLikelyEmptyRoom(err error) bool {
 	if err == nil {
 		return false
@@ -29,9 +35,14 @@ func isLikelyEmptyRoom(err error) bool {
 		strings.Contains(s, "gotHello=false")
 }
 
-// Runner owns the lifecycle of a single inbound: Telemost session,
-// tunnel sender/receivers, and the wgrelay creator. Run blocks until
-// the context is cancelled or an unrecoverable error occurs.
+// Runner owns the lifecycle of a single inbound: SFU session, wgrelay
+// bridge, and the live-status surface used by the admin panel. Run
+// blocks until the context is cancelled or an unrecoverable error
+// occurs; the Manager retries with backoff between calls.
+//
+// Multi-transport: Runner is transport-agnostic; the actual SFU stack
+// (Telemost vs LiveKit/WB-Stream) is hidden behind sfu.Transport, picked
+// from Spec.Transport at Run time.
 type Runner struct {
 	Spec   Spec
 	Logger *log.Logger
@@ -41,7 +52,7 @@ type Runner struct {
 	lastError string
 	startedAt time.Time
 
-	creator atomic.Pointer[wgrelay.WGCreator]
+	bridge atomic.Pointer[wgrelay.SFUBridge]
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
@@ -66,130 +77,100 @@ func (r *Runner) setError(err error) {
 	r.mu.Unlock()
 }
 
-// Run executes one full attempt at standing up the inbound. Returns when
-// ctx is cancelled or a fatal error occurs. The Manager retries with
-// backoff on errors.
+// Run executes one full attempt at standing up the inbound.
 func (r *Runner) Run(ctx context.Context) error {
 	r.setPhase("starting")
 	r.mu.Lock()
 	r.startedAt = time.Now()
 	r.mu.Unlock()
 
-	displayName := identity.NameOrGenerate(r.Spec.DisplayName)
-	r.Logger.Printf("display name: %s", displayName)
-
-	sess, err := session.SetupSession(ctx, r.Logger, r.Spec.Meeting, displayName)
+	connectSpec, err := r.buildConnectSpec()
 	if err != nil {
 		r.setError(err)
-		return fmt.Errorf("session setup: %w", err)
+		return fmt.Errorf("build connect spec: %w", err)
 	}
-	defer sess.Close()
 
-	go session.RunOpusSilenceLoop(ctx, r.Logger, sess.AudioTrack)
-	go session.RunKeyframeRefresh(ctx, r.Logger, sess.VideoTrack)
-	if err := session.SendInitialKeyframes(r.Logger, sess.VideoTrack, 10); err != nil {
+	transport, err := sfu.Get(connectSpec.Kind)
+	if err != nil {
 		r.setError(err)
-		return fmt.Errorf("camera keyframe warmup: %w", err)
+		return err
 	}
 
-	merged := make(chan tunnel.ReceivedFrame, 512)
-	go func() {
-		idx := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case tr, ok := <-sess.NewVideoTracks():
-				if !ok {
-					return
-				}
-				idx++
-				rcv := tunnel.NewReceiver(256)
-				go rcv.Run(ctx, tr, r.Logger)
-				go func(recv *tunnel.Receiver) {
-					for f := range recv.Frames() {
-						select {
-						case merged <- f:
-						case <-ctx.Done():
-							return
-						}
-					}
-				}(rcv)
-			}
-		}
-	}()
-
-	r.setPhase("waiting_peer")
-	r.Logger.Printf("WAIT waiting for client peer...")
-	if _, err := sess.WaitForPeer(ctx, 5*time.Minute); err != nil {
-		r.setError(err)
-		return fmt.Errorf("wait for peer: %w", err)
-	}
-
-	// Until a real client completes the in-tunnel HELLO/ACK handshake,
-	// surface the inbound as "waiting_for_client" — the SFU's empty-room
-	// "ghost peer" doesn't reply, but that's not an error condition for
-	// the operator to act on. The phase flips to "relaying" on success.
 	r.setPhase("waiting_for_client")
-	r.Logger.Printf("WAIT peer detected, starting handshake")
-
-	cameraSender := tunnel.NewSender(sess.VideoTrack)
-	cameraSender.VP8Wrap = true
-	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
-	cameraSender.Start()
-	defer cameraSender.Close()
-
-	peerID, err := session.Handshake(ctx, r.Logger, sess, cameraSender, merged, 1)
+	r.Logger.Printf("connecting via transport=%s", connectSpec.Kind)
+	sess, err := transport.Connect(ctx, connectSpec)
 	if err != nil {
-		// Handshake timeouts before anyone connected aren't real
-		// failures — the SFU just shows the empty meeting as having a
-		// "ghost" peer (residual tracks, our own subscriber view, etc.)
-		// and we wait for HELLO that never comes. Clear the error and
-		// surface this as the dedicated "waiting_for_client" phase so
-		// the panel doesn't scream red until a client actually joins.
+		// Empty-room handshake timeout from Telemost is normal until a
+		// real client joins — surface as "waiting_for_client" rather
+		// than red error in the admin panel.
 		if isLikelyEmptyRoom(err) {
 			r.mu.Lock()
 			r.lastError = ""
 			r.phase = "waiting_for_client"
 			r.mu.Unlock()
 			r.Logger.Printf("HANDSHAKE: no client connected yet — supervisor will retry shortly")
-			return fmt.Errorf("handshake: %w", err)
+			return fmt.Errorf("connect: %w", err)
 		}
 		r.setError(err)
-		return fmt.Errorf("handshake: %w", err)
+		return fmt.Errorf("connect: %w", err)
 	}
-	r.Logger.Printf("HANDSHAKE ✓ peer=%s", peerID)
+	defer sess.Close()
+	r.Logger.Printf("session ready")
 
-	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, r.Logger, 100*time.Millisecond)
-	session.StartRTCPLoop(ctx, r.Logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI)
-
-	go func() {
-		for i, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-				sess.RebindSlots(ctx, 4+i)
-			}
-		}
-	}()
-
-	dt := wgrelay.New(cameraSender, merged, r.Logger)
-	creator := wgrelay.NewCreator(r.Spec.WGEndpoint, dt, r.Logger)
-	r.creator.Store(creator)
-
-	go dt.Run(ctx)
+	bridge := wgrelay.NewServerBridge(r.Spec.WGEndpoint, sess, r.Logger)
+	r.bridge.Store(bridge)
+	defer r.bridge.Store(nil)
 
 	r.setPhase("relaying")
 	r.setError(nil)
 	r.Logger.Printf("✓ inbound %s relaying to %s", r.Spec.Tag, r.Spec.WGEndpoint)
 
-	if err := creator.Run(ctx); err != nil && err != wgrelay.ErrTunnelClosed {
-		r.setError(err)
-		return fmt.Errorf("creator: %w", err)
+	if err := bridge.Run(ctx); err != nil {
+		if errors.Is(err, sfu.ErrPeerRehandshake) || errors.Is(err, wgrelay.ErrPeerRehandshake) {
+			// Surface to the supervisor for fast retry without
+			// recording it as an "error" state in the panel.
+			r.setPhase("waiting_for_client")
+			return err
+		}
+		if !errors.Is(err, wgrelay.ErrTunnelClosed) {
+			r.setError(err)
+			return fmt.Errorf("bridge: %w", err)
+		}
 	}
 	r.setPhase("stopped")
 	return nil
+}
+
+// buildConnectSpec maps the persisted Spec onto an sfu.ConnectSpec.
+// Empty Spec.Transport defaults to Telemost for backward compatibility.
+func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
+	kind := sfu.Kind(r.Spec.Transport)
+	if kind == "" {
+		kind = sfu.KindTelemost
+	}
+
+	cs := sfu.ConnectSpec{
+		Kind:        kind,
+		DisplayName: r.Spec.DisplayName,
+		Logger:      r.Logger,
+	}
+
+	switch kind {
+	case sfu.KindTelemost:
+		cs.Telemost = &sfu.TelemostConnect{MeetingURL: r.Spec.Meeting}
+	case sfu.KindLiveKitWBStream:
+		if r.Spec.LiveKit == nil {
+			return cs, fmt.Errorf("inbound %s: transport=livekit-wb-stream but Spec.LiveKit is nil", r.Spec.Tag)
+		}
+		cs.LiveKitWBStream = &sfu.LiveKitWBStreamConnect{
+			RoomURL:     r.Spec.LiveKit.RoomURL,
+			AccessToken: r.Spec.LiveKit.AccessToken,
+			Cookies:     r.Spec.LiveKit.Cookies,
+		}
+	default:
+		return cs, fmt.Errorf("inbound %s: unknown transport %q", r.Spec.Tag, kind)
+	}
+	return cs, nil
 }
 
 // Status returns the current state for the admin panel.
@@ -212,11 +193,11 @@ func (r *Runner) Status() Status {
 		WGIface:    r.Spec.WGInterface,
 		StartedAt:  startedAt,
 	}
-	if c := r.creator.Load(); c != nil {
-		st.TxPackets = c.TxPackets.Load()
-		st.TxBytes = c.TxBytes.Load()
-		st.RxPackets = c.RxPackets.Load()
-		st.RxBytes = c.RxBytes.Load()
+	if b := r.bridge.Load(); b != nil {
+		st.TxPackets = b.TxPackets.Load()
+		st.TxBytes = b.TxBytes.Load()
+		st.RxPackets = b.RxPackets.Load()
+		st.RxBytes = b.RxBytes.Load()
 	}
 	return st
 }
