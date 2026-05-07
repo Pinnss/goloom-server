@@ -1,99 +1,65 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"net"
 	"os"
 
-	"github.com/Pinnss/goloom-server/internal/connstr"
+	"github.com/Pinnss/goloom-server/pkg/wgclient"
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the unified client config — now transport-agnostic.
-//
-// For Telemost-based inbounds, only Meeting + the common fields matter;
-// LiveKit fields stay empty. For WB Stream / LiveKit inbounds, set
-// Transport="livekit-wb-stream" plus the corresponding LiveKit*
-// credentials. Empty Transport falls back to Telemost.
-type Config struct {
-	// Transport selects the SFU implementation. Empty defaults to
-	// telemost. See [sfu.Kind] for valid values.
-	Transport string `yaml:"transport,omitempty"`
+// errUsage signals "no input provided" — main.go turns it into a
+// usage banner via log.Fatalf.
+var errUsage = errors.New("usage: goloom-wg-client -connect goloom://... | -config path.yaml [-listen 127.0.0.1:51820]")
 
-	// Meeting is the Telemost meeting URL. Required when Transport ==
-	// "telemost" (or empty); ignored otherwise.
-	Meeting string `yaml:"meeting,omitempty"`
-
-	// LiveKit credentials for Transport == "livekit-wb-stream".
-	// LiveKitRoomURL is the public room link
-	// (https://stream.wb.ru/room/<id>); LiveKitAccessToken /
-	// LiveKitCookies come from the admin webview-auth bundle.
+// yamlConfig mirrors the on-disk YAML schema. Stays in the cmd
+// package so the wgclient library doesn't pull a YAML dependency for
+// callers (e.g. the GUI) that build the Config struct programmatically.
+type yamlConfig struct {
+	Transport          string `yaml:"transport,omitempty"`
+	Meeting            string `yaml:"meeting,omitempty"`
 	LiveKitRoomURL     string `yaml:"livekit_room_url,omitempty"`
 	LiveKitAccessToken string `yaml:"livekit_access_token,omitempty"`
 	LiveKitCookies     string `yaml:"livekit_cookies,omitempty"`
-
-	DisplayName string `yaml:"display_name"`
-	ListenAddr  string `yaml:"listen_addr"`
-	LogLevel    string `yaml:"log_level"`
+	DisplayName        string `yaml:"display_name,omitempty"`
+	ListenAddr         string `yaml:"listen_addr,omitempty"`
+	LogLevel           string `yaml:"log_level,omitempty"` // accepted for back-compat, currently unused
 }
 
-func DefaultConfig() *Config {
-	return &Config{
-		DisplayName: "",
-		ListenAddr:  "127.0.0.1:51820",
-		LogLevel:    "info",
-	}
-}
-
-func LoadConfig(path string) (*Config, error) {
+func loadYAMLConfig(path string) (wgclient.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return wgclient.Config{}, fmt.Errorf("read config: %w", err)
 	}
-	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	var y yamlConfig
+	if err := yaml.Unmarshal(data, &y); err != nil {
+		return wgclient.Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	if err := cfg.validate(); err != nil {
-		return nil, err
+	cfg := wgclient.Config{
+		Transport:          y.Transport,
+		Meeting:            y.Meeting,
+		LiveKitRoomURL:     y.LiveKitRoomURL,
+		LiveKitAccessToken: y.LiveKitAccessToken,
+		LiveKitCookies:     y.LiveKitCookies,
+		DisplayName:        y.DisplayName,
+		ListenAddr:         y.ListenAddr,
+	}
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:51820"
+	}
+	if err := cfg.Validate(); err != nil {
+		return wgclient.Config{}, err
 	}
 	return cfg, nil
 }
 
-func (c *Config) validate() error {
-	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
-		return fmt.Errorf("listen_addr %q: %w", c.ListenAddr, err)
-	}
-	switch c.Transport {
-	case "", "telemost":
-		if c.Meeting == "" {
-			return fmt.Errorf("meeting URL is required for transport=telemost")
-		}
-	case "livekit-wb-stream":
-		if c.LiveKitRoomURL == "" {
-			return fmt.Errorf("livekit_room_url is required for transport=livekit-wb-stream")
-		}
-		if c.LiveKitAccessToken == "" {
-			return fmt.Errorf("livekit_access_token is required (run admin webview-auth flow)")
-		}
-	default:
-		return fmt.Errorf("unknown transport %q", c.Transport)
-	}
-	return nil
-}
-
-func ConfigFromConnStr(s string) (*Config, error) {
-	p, err := connstr.Decode(s)
-	if err != nil {
-		return nil, err
-	}
-	cfg := DefaultConfig()
-	// connstr currently only carries Telemost-style fields. WB Stream
-	// inbounds are set up via the admin panel and their Config is
-	// distributed as a YAML file (or an extended connstr spec — TBD).
-	cfg.Meeting = p.Meeting
-	if p.DisplayName != "" {
-		cfg.DisplayName = p.DisplayName
-	}
-	return cfg, nil
+// isAdmin returns true when the process can perform privileged
+// operations (route table edits). The check is heuristic — we try to
+// open a path that requires Administrator on Windows. Linux/macOS get
+// a permissive true since the route manager is currently a no-op
+// there anyway.
+func isAdmin() bool {
+	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
+	return err == nil
 }
