@@ -31,6 +31,7 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/tun"
 
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 )
@@ -64,6 +65,23 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 	}
 	if endpoint == "" {
 		return nil, errors.New("auto-WG: empty endpoint")
+	}
+
+	// Pre-flight diagnostics. Wintun's CreateAdapter returns
+	// "Access is denied" when the process token lacks admin or
+	// SeLoadDriverPrivilege. We surface that explicitly here so a
+	// failed launch isn't a guessing game between AV / wrong DLL /
+	// non-elevated session.
+	if err := logProcessPrivileges(lg); err != nil {
+		lg.Printf("WARN auto-WG: privilege probe: %v", err)
+	}
+
+	// Try to enable SeLoadDriverPrivilege if it's present-but-disabled
+	// on our token. Wintun does this internally too, but if our
+	// process happened to start without that privilege at all,
+	// adapter creation will fail with Access is denied.
+	if err := enableLoadDriverPrivilege(lg); err != nil {
+		lg.Printf("WARN auto-WG: enable SeLoadDriverPrivilege: %v", err)
 	}
 
 	dns := cfg.DNS
@@ -185,4 +203,48 @@ func abbrevKey(b64 string) string {
 		return b64
 	}
 	return b64[:8] + "…" + b64[len(b64)-4:]
+}
+
+// logProcessPrivileges dumps token elevation state. Wintun's
+// CreateAdapter returns "Access is denied" when the process token
+// isn't elevated, so we surface this in the log to make root-causing
+// failed launches a one-liner check instead of a guessing game.
+func logProcessPrivileges(lg *log.Logger) error {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return fmt.Errorf("OpenProcessToken: %w", err)
+	}
+	defer token.Close()
+
+	lg.Printf("auto-WG: process elevated=%v", token.IsElevated())
+	return nil
+}
+
+// enableLoadDriverPrivilege flips SeLoadDriverPrivilege to enabled
+// on the current token if the privilege is present-but-disabled.
+// No-op (with a warning) if the privilege isn't on the token at all
+// — that means wintun creation will fail downstream and the
+// elevated=false log line above already explains why.
+func enableLoadDriverPrivilege(lg *log.Logger) error {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_QUERY|windows.TOKEN_ADJUST_PRIVILEGES, &token); err != nil {
+		return fmt.Errorf("OpenProcessToken: %w", err)
+	}
+	defer token.Close()
+
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil,
+		windows.StringToUTF16Ptr("SeLoadDriverPrivilege"), &luid); err != nil {
+		return fmt.Errorf("lookup SeLoadDriverPrivilege: %w", err)
+	}
+	var tp windows.Tokenprivileges
+	tp.PrivilegeCount = 1
+	tp.Privileges[0].Luid = luid
+	tp.Privileges[0].Attributes = windows.SE_PRIVILEGE_ENABLED
+
+	if err := windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil); err != nil {
+		return fmt.Errorf("AdjustTokenPrivileges: %w", err)
+	}
+	return nil
 }
