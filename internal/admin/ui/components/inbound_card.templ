@@ -7,16 +7,15 @@ import (
 	"github.com/Pinnss/goloom-server/internal/inbound"
 )
 
-// InboundCard renders one inbound row on the dashboard. The whole card
-// is HTMX-swappable: the SSE listener replaces it by ID when the
-// runner emits a status update. Action buttons hit the JSON API
-// endpoints we kept from the original admin server, then trigger a
-// targeted refresh.
+// InboundCard renders one inbound row on the dashboard. Plain DOM node:
+// refreshes via SSE replacing the whole InboundCardList wrapper, or
+// per-card htmx targeted swap via #inbound-card-<id>. Action buttons
+// hit the JSON API endpoints from the original admin server, then
+// trigger a targeted refresh.
 templ InboundCard(s inbound.Status) {
 	<div
 		class="card flex flex-col gap-2"
 		id={ "inbound-card-" + s.ID }
-		hx-swap-oob="true"
 	>
 		<div class="flex items-center justify-between">
 			<div class="flex items-center gap-2">

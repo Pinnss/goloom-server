@@ -9,6 +9,10 @@ package ui
 
 // Layout is the global page shell. `bodyClass` is appended onto <body>
 // so individual pages (e.g. login) can opt into a centred layout.
+//
+// `x-data` on <body> bootstraps Alpine for the whole tree — without
+// it, `@click` / `x-show` directives on descendants silently no-op
+// because Alpine only binds nodes that have an `x-data` ancestor.
 templ Layout(title, bodyClass string) {
 	<!doctype html>
 	<html lang="ru" class="bg-bg">
@@ -22,7 +26,10 @@ templ Layout(title, bodyClass string) {
 			<script src="/static/htmx-sse.js"></script>
 			<script defer src="/static/alpine.min.js"></script>
 		</head>
-		<body class={ "min-h-screen bg-bg text-slate-100 font-sans antialiased", bodyClass }>
+		<body
+			x-data
+			class={ "min-h-screen bg-bg text-slate-100 font-sans antialiased", bodyClass }
+		>
 			{ children... }
 		</body>
 	</html>
