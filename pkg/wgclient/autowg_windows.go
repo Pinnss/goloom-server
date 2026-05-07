@@ -28,6 +28,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/Pinnss/goloom-server/internal/tun"
 
@@ -118,9 +119,12 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 	// route through ours so trace stays filtered. LogLevelError
 	// keeps the chatter down — we get only real failures.
 	bind := conn.NewDefaultBind()
+	// wireguard-go verbose lines go through our trace classifier so
+	// they're hidden by default but available via the GUI's "trace"
+	// toggle. Errors stay surfaced as warnings.
 	wgLogger := &device.Logger{
-		Verbosef: func(format string, args ...any) {}, // suppress
-		Errorf:   func(format string, args ...any) { lg.Printf("WARN auto-WG: "+format, args...) },
+		Verbosef: func(format string, args ...any) { lg.Printf("WG-USERSPACE: "+format, args...) },
+		Errorf:   func(format string, args ...any) { lg.Printf("WARN WG-USERSPACE: "+format, args...) },
 	}
 	wgDev := device.NewDevice(tunDev.Dev, bind, wgLogger)
 
@@ -167,8 +171,63 @@ func startAutoWG(ctx context.Context, lg *log.Logger, cfg WGParams, listenAddr s
 	lg.Printf("auto-WG ✓ — tun=%s addr=%s endpoint=%s peer=%s",
 		tunDev.Name, cfg.ClientAddr, endpoint, abbrevKey(cfg.ServerPublicKey))
 
+	a := &autoWG{tun: tunDev, dev: wgDev, logger: lg}
+	go a.runStateProbe(ctx)
+
 	cleanup = nil
-	return &autoWG{tun: tunDev, dev: wgDev, logger: lg}, nil
+	return a, nil
+}
+
+// runStateProbe polls IpcGet every 5 seconds and logs the
+// last_handshake_time + transfer counters so we can see whether
+// wireguard-go is actually pumping data through the tunnel. Goes
+// silent once ctx is cancelled.
+func (a *autoWG) runStateProbe(ctx context.Context) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if a.dev == nil {
+				return
+			}
+			ipc, err := a.dev.IpcGet()
+			if err != nil {
+				a.logger.Printf("WARN auto-WG: IpcGet: %v", err)
+				continue
+			}
+			summary := summarisePeerState(ipc)
+			a.logger.Printf("auto-WG state: %s", summary)
+		}
+	}
+}
+
+// summarisePeerState parses the IpcGet output (uapi v1 KV format)
+// into a human-readable one-liner: last_handshake age, tx/rx bytes.
+func summarisePeerState(ipc string) string {
+	var lastHandshake int64
+	var rxBytes, txBytes uint64
+	for _, line := range strings.Split(ipc, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "last_handshake_time_sec":
+			fmt.Sscanf(v, "%d", &lastHandshake)
+		case "rx_bytes":
+			fmt.Sscanf(v, "%d", &rxBytes)
+		case "tx_bytes":
+			fmt.Sscanf(v, "%d", &txBytes)
+		}
+	}
+	hsAge := "never"
+	if lastHandshake > 0 {
+		hsAge = time.Since(time.Unix(lastHandshake, 0)).Truncate(time.Second).String() + " ago"
+	}
+	return fmt.Sprintf("handshake=%s tx=%d rx=%d", hsAge, txBytes, rxBytes)
 }
 
 // Stop closes the wg device (which closes the tun device too) and

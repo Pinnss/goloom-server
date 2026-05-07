@@ -669,6 +669,12 @@ func isTraceNoise(text string) bool {
 		(strings.Contains(text, "empty/other") || strings.Contains(text, " empty/")) {
 		return true
 	}
+	// wireguard-go internal verbose chatter (per-keepalive sends,
+	// per-handshake retransmissions). Useful for debugging the WG
+	// tunnel itself, not for everyday operator viewing.
+	if strings.Contains(text, "WG-USERSPACE:") {
+		return true
+	}
 	// All PUB-rtcp / SUB-rtcp forwarding chatter. Pion logs every
 	// received report — SR/RR statistics, transport-cc CCFeedback,
 	// REMB, NACK, PLI, FIR. All are SFU-debug useful, operator
