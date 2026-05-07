@@ -1,0 +1,49 @@
+package components
+
+import "fmt"
+
+// WGRow describes one row in the WG-interface table. Mirrors
+// admin.wgInterfaceInfo so we can render without exposing internal
+// types into the ui package.
+type WGRow struct {
+	Name       string
+	ListenPort int
+	NumPeers   int
+	Managed    bool
+	InboundTag string
+}
+
+// WGTable renders the bottom-of-dashboard wireguard interface list.
+// Re-fetched every 5s by HTMX (see Dashboard).
+templ WGTable(rows []WGRow) {
+	if len(rows) == 0 {
+		<div class="text-muted text-xs py-2">Нет активных wg-интерфейсов</div>
+	} else {
+		<table class="w-full text-xs border-collapse">
+			<thead>
+				<tr class="text-muted border-b border-line">
+					<th class="text-left py-1 px-2">iface</th>
+					<th class="text-left py-1 px-2">port</th>
+					<th class="text-left py-1 px-2">peers</th>
+					<th class="text-left py-1 px-2">статус</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, r := range rows {
+					<tr class="border-b border-line/40">
+						<td class="py-1 px-2 font-mono">{ r.Name }</td>
+						<td class="py-1 px-2">{ fmt.Sprintf("%d", r.ListenPort) }</td>
+						<td class="py-1 px-2">{ fmt.Sprintf("%d", r.NumPeers) }</td>
+						<td class="py-1 px-2">
+							if r.Managed {
+								<span class="text-accent">managed: { r.InboundTag }</span>
+							} else {
+								<span class="text-warn">unmanaged</span>
+							}
+						</td>
+					</tr>
+				}
+			</tbody>
+		</table>
+	}
+}

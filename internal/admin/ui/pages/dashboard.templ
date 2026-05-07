@@ -1,0 +1,128 @@
+package pages
+
+import (
+	"github.com/Pinnss/goloom-server/internal/admin/ui"
+	"github.com/Pinnss/goloom-server/internal/admin/ui/components"
+	"github.com/Pinnss/goloom-server/internal/inbound"
+)
+
+// DashboardData bundles everything the dashboard page needs in a single
+// struct so the handler builds it once.
+type DashboardData struct {
+	Username          string
+	IsDefaultPassword bool
+	Inbounds          []inbound.Status
+}
+
+// Dashboard renders the main control surface — list of inbounds with
+// live status (HTMX SSE), a header bar with account dropdown, and
+// the WG-interface table at the bottom.
+templ Dashboard(d DashboardData) {
+	@ui.Layout("goloom admin", "") {
+		@components.ModalsStore()
+		<main class="max-w-6xl mx-auto p-5">
+			<header class="flex items-center gap-3 mb-4">
+				@components.EyeLogo("on", 48)
+				<h1 class="text-lg font-semibold">
+					goloom <span class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-accent text-slate-900">admin</span>
+				</h1>
+				<div class="flex-1"></div>
+				<div class="flex items-center gap-2 text-xs text-muted">
+					<span class="font-mono text-slate-200">{ d.Username }</span>
+					<button
+						class="btn-ghost"
+						@click="$store.modals.account = true"
+					>{ "⚙ Аккаунт" }</button>
+					<button
+						class="btn-ghost"
+						hx-post="/logout"
+						hx-on::after-request="location='/login'"
+					>{ "Выйти" }</button>
+				</div>
+			</header>
+
+			if d.IsDefaultPassword {
+				<div class="rounded-md border border-danger/60 bg-danger/15 text-slate-100 px-4 py-3 mb-4 flex items-center gap-3">
+					<span class="text-xl">⚠</span>
+					<span class="flex-1 text-sm">
+						Используется временный пароль по умолчанию.
+						<b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.
+					</span>
+					<button class="btn-primary" @click="$store.modals.account = true">Сменить пароль</button>
+				</div>
+			}
+
+			<div class="flex flex-wrap gap-2 mb-4">
+				<button class="btn-primary" @click="$store.modals.inbound = true">+ Создать inbound</button>
+				<button
+					class="btn-ghost"
+					hx-get="/htmx/inbounds"
+					hx-target="#inbound-card-list"
+					hx-swap="outerHTML"
+				>Обновить</button>
+			</div>
+
+			// SSE wrapper — htmx-sse extension pushes a fresh card list
+			// every second from /htmx/inbounds/stream.
+			<div hx-ext="sse" sse-connect="/htmx/inbounds/stream">
+				<div sse-swap="inbounds" hx-swap="outerHTML">
+					@components.InboundCardList(d.Inbounds)
+				</div>
+			</div>
+
+			<details class="mt-6 group">
+				<summary class="cursor-pointer text-muted text-xs select-none">
+					WG-интерфейсы на сервере
+				</summary>
+				<div
+					id="wg-list"
+					class="mt-2"
+					hx-get="/htmx/wg-interfaces"
+					hx-trigger="load, every 5s"
+					hx-swap="innerHTML"
+				></div>
+			</details>
+
+			<div id="toast" class="fixed bottom-4 right-4 z-50"></div>
+
+			@accountModal()
+			@inboundModal()
+		</main>
+	}
+}
+
+templ accountModal() {
+	@components.Modal("account", "Сменить пароль") {
+		<form
+			class="flex flex-col gap-3"
+			hx-post="/api/admin/password"
+			hx-ext="json-enc"
+			hx-on::after-request="if (event.detail.successful) { $store.modals.account = false; location.reload(); }"
+		>
+			<div>
+				<label class="field-label">Текущий пароль</label>
+				<input class="field-input" name="current" type="password" autocomplete="current-password"/>
+			</div>
+			<div>
+				<label class="field-label">Новый пароль (минимум 8 символов)</label>
+				<input class="field-input" name="new" type="password" autocomplete="new-password"/>
+			</div>
+			<div>
+				<label class="field-label">Подтверждение</label>
+				<input class="field-input" name="confirm" type="password" autocomplete="new-password"/>
+			</div>
+			<div class="flex gap-2 mt-1">
+				<button class="btn-primary" type="submit">Сменить</button>
+				<button class="btn-ghost" type="button" @click="$store.modals.account = false">Отмена</button>
+			</div>
+		</form>
+	}
+}
+
+templ inboundModal() {
+	@components.Modal("inbound", "Новый inbound") {
+		<div hx-get="/htmx/inbound/new" hx-trigger="load" hx-swap="innerHTML">
+			<div class="text-muted text-sm">Загрузка формы…</div>
+		</div>
+	}
+}

@@ -1,0 +1,80 @@
+package pages
+
+// InboundForm renders the create/edit form for one inbound. The
+// `Transport` dropdown chooses between Telemost (current behaviour)
+// and WB Stream (new transport, wired up in the parallel
+// feat/sfu-multi-transport branch — UI is in place even though the
+// backend won't honour it yet, by design of this branch).
+templ InboundForm() {
+	<form
+		class="flex flex-col gap-3"
+		x-data={ "{ transport: 'telemost' }" }
+		hx-post="/api/inbounds"
+		hx-ext="json-enc"
+		hx-on::after-request="if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', '/htmx/inbounds', '#inbound-card-list'); }"
+	>
+		<div>
+			<label class="field-label">Tag (короткое имя)</label>
+			<input class="field-input" name="tag" placeholder="personal"/>
+		</div>
+
+		<div>
+			<label class="field-label">Transport</label>
+			<select class="field-input" name="transport" x-model="transport">
+				<option value="telemost">Telemost</option>
+				<option value="wb_stream">WB Stream</option>
+			</select>
+		</div>
+
+		<div x-show="transport === 'telemost'">
+			<label class="field-label">Meeting URL</label>
+			<input
+				class="field-input"
+				name="meeting"
+				placeholder="https://telemost.yandex.ru/j/..."
+			/>
+		</div>
+
+		<div x-show="transport === 'wb_stream'" x-cloak>
+			<label class="field-label">Room URL</label>
+			<input
+				class="field-input"
+				name="meeting"
+				placeholder="https://stream.wb.ru/r/..."
+			/>
+			<button
+				type="button"
+				class="btn-ghost mt-2 text-xs"
+				disabled
+				title="Будет включено после мерджа feat/sfu-multi-transport"
+			>{ "🔐 Authenticate via WB" }</button>
+			// TODO: wire up wb-auth bookmarklet flow (parallel branch
+			// feat/sfu-multi-transport).
+		</div>
+
+		<div>
+			<label class="field-label">Display name (пусто = случайное)</label>
+			<input class="field-input" name="display_name"/>
+		</div>
+
+		<div x-data={ "{ auto: true }" }>
+			<label class="inline-flex items-center gap-2 text-sm">
+				<input type="checkbox" name="auto_provision" x-model="auto" checked/>
+				<span>Создать новый WG-интерфейс автоматически</span>
+			</label>
+			<div class="mt-2" x-show="!auto" x-cloak>
+				<label class="field-label">WG endpoint (если без авто-провижна)</label>
+				<input class="field-input" name="wg_endpoint" value="127.0.0.1:51820"/>
+			</div>
+		</div>
+
+		<div class="flex gap-2 mt-1">
+			<button class="btn-primary" type="submit">Создать</button>
+			<button
+				class="btn-ghost"
+				type="button"
+				@click="$store.modals.inbound = false"
+			>Отмена</button>
+		</div>
+	</form>
+}
