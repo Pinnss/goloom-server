@@ -18,12 +18,13 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App is the JS-visible binding surface. Holds the wgclient.Service
-// and a reference to the wails context so we can emit events and
-// dialogs from anywhere on the goroutine tree.
+// App is the JS-visible binding surface. Holds the wgclient.Service,
+// the persistent profile store, and a reference to the wails context
+// so we can emit events and dialogs from anywhere on the goroutine tree.
 type App struct {
-	ctx context.Context
-	svc *wgclient.Service
+	ctx      context.Context
+	svc      *wgclient.Service
+	profiles *profileStore
 
 	// stopFanOut closes when shutdown begins, so fan-out goroutine
 	// drops its subscription cleanly.
@@ -33,11 +34,26 @@ type App struct {
 // NewApp creates a new App with a fresh Service. Subscribe + event
 // fan-out are wired in startup() — we need a live wails context for
 // runtime.EventsEmit, which doesn't exist until OnStartup fires.
+//
+// Profile store init failure is non-fatal — we log it and the
+// frontend will see an empty list. Common cause is a permission
+// problem on %APPDATA%; ignoring it lets the user still paste a
+// connstr ad-hoc.
 func NewApp() *App {
-	return &App{
+	app := &App{
 		svc:        wgclient.New(),
 		stopFanOut: make(chan struct{}),
 	}
+	if ps, err := newProfileStore(); err == nil {
+		app.profiles = ps
+	} else {
+		// Defer the error report to startup() once the wails logger
+		// is available. For now stash a placeholder so binding calls
+		// fail predictably rather than nil-panic.
+		app.profiles = nil
+		log.Printf("profiles: store init failed: %v (operating profile-less)", err)
+	}
+	return app
 }
 
 // startup is called once the Wails app and frontend are ready.
@@ -49,6 +65,9 @@ func (a *App) startup(ctx context.Context) {
 		secondary: os.Stderr,
 	})
 	log.Printf("[gui] startup")
+	if a.profiles != nil {
+		a.svc.Logger().Printf("profiles: %d loaded from %s", len(a.profiles.List()), a.profiles.Path())
+	}
 
 	go a.fanOutEvents()
 }
@@ -89,11 +108,11 @@ func (a *App) fanOutEvents() {
 	}
 }
 
-// ─── JS bindings ──────────────────────────────────────────────────
+// ─── connection bindings ─────────────────────────────────────────
 
-// Connect starts a tunnel session. The connstr is a goloom://...
-// link copied from the admin panel. Returns the parsed config so the
-// frontend can show the operator what was decoded.
+// Connect starts a tunnel session from a raw connstr. Convenience
+// wrapper around ImportProfile + ConnectProfile that does NOT save
+// — useful for one-shot debug runs without polluting the store.
 func (a *App) Connect(connstr string) (wgclient.Config, error) {
 	cfg, err := wgclient.FromConnStr(connstr)
 	if err != nil {
@@ -108,22 +127,36 @@ func (a *App) Connect(connstr string) (wgclient.Config, error) {
 	return cfg, nil
 }
 
-// Disconnect tears down the running session. Idempotent.
-func (a *App) Disconnect() {
-	a.svc.Stop()
+// ConnectProfile loads the profile by ID, starts a session, and
+// records the use timestamp for sorting.
+func (a *App) ConnectProfile(id string) (Profile, error) {
+	if a.profiles == nil {
+		return Profile{}, errors.New("profile store unavailable")
+	}
+	p, ok := a.profiles.Get(id)
+	if !ok {
+		return Profile{}, fmt.Errorf("profile %q not found", id)
+	}
+	if err := a.svc.Start(a.ctx, p.Config); err != nil {
+		if errors.Is(err, wgclient.ErrAlreadyRunning) {
+			return p, errors.New("session is already running — disconnect first")
+		}
+		return p, err
+	}
+	a.profiles.MarkUsed(p.ID, a.svc.Logger())
+	return p, nil
 }
+
+// Disconnect tears down the running session. Idempotent.
+func (a *App) Disconnect() { a.svc.Stop() }
 
 // Status returns the current snapshot. Used by the frontend on initial
 // load and as a fallback if event delivery dropped a frame.
-func (a *App) Status() wgclient.Status {
-	return a.svc.Status()
-}
+func (a *App) Status() wgclient.Status { return a.svc.Status() }
 
 // RecentLogs returns the last `n` captured log lines (newest last).
 // Used by the frontend to backfill the log pane on page (re)load.
-func (a *App) RecentLogs(n int) []wgclient.LogLine {
-	return a.svc.RecentLogs(n)
-}
+func (a *App) RecentLogs(n int) []wgclient.LogLine { return a.svc.RecentLogs(n) }
 
 // SetVerbose toggles trace-line capture. When off (default), the
 // SFU's RTCP / ping-ack chatter is dropped before it enters the
@@ -135,3 +168,67 @@ func (a *App) SetVerbose(on bool) { a.svc.SetVerbose(on) }
 // Verbose returns the current verbose flag so the frontend can
 // initialise the UI checkbox state on first load.
 func (a *App) Verbose() bool { return a.svc.Verbose() }
+
+// ─── profile bindings ────────────────────────────────────────────
+
+// ListProfiles returns all saved profiles, ordered most-recently-used
+// first. Empty slice is fine for the UI (just renders an empty list).
+func (a *App) ListProfiles() []Profile {
+	if a.profiles == nil {
+		return []Profile{}
+	}
+	return a.profiles.List()
+}
+
+// ActiveProfileID returns the ID of the last-connected profile so
+// the UI can preselect it on launch.
+func (a *App) ActiveProfileID() string {
+	if a.profiles == nil {
+		return ""
+	}
+	return a.profiles.ActiveID()
+}
+
+// ImportProfile parses a connstr, saves it as a new profile, and
+// returns the persisted record. If name is empty, a default is
+// inferred from the decoded transport + meeting URL.
+func (a *App) ImportProfile(connstr, name string) (Profile, error) {
+	if a.profiles == nil {
+		return Profile{}, errors.New("profile store unavailable")
+	}
+	cfg, err := wgclient.FromConnStr(connstr)
+	if err != nil {
+		return Profile{}, fmt.Errorf("decode connstr: %w", err)
+	}
+	return a.profiles.Add(name, cfg)
+}
+
+// SaveProfile creates or updates a profile from raw fields. Used by
+// the manual-form path of the "Add profile" modal.
+func (a *App) SaveProfile(id, name string, cfg wgclient.Config) (Profile, error) {
+	if a.profiles == nil {
+		return Profile{}, errors.New("profile store unavailable")
+	}
+	if id == "" {
+		return a.profiles.Add(name, cfg)
+	}
+	return a.profiles.Update(id, name, cfg)
+}
+
+// DeleteProfile removes a profile by ID. Returns an error if the
+// profile doesn't exist.
+func (a *App) DeleteProfile(id string) error {
+	if a.profiles == nil {
+		return errors.New("profile store unavailable")
+	}
+	return a.profiles.Delete(id)
+}
+
+// ProfilesPath returns the on-disk JSON path so the UI can show
+// "Open in explorer" or similar affordances.
+func (a *App) ProfilesPath() string {
+	if a.profiles == nil {
+		return ""
+	}
+	return a.profiles.Path()
+}

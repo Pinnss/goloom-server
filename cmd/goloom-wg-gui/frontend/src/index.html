@@ -28,9 +28,15 @@
 <main>
     <section class="card">
         <h2>Подключение</h2>
-        <label class="field-label" for="connstr">Connection string из админки</label>
-        <textarea id="connstr" class="field" rows="3" autocomplete="off"
-                  placeholder="goloom://eyJ..."></textarea>
+        <div id="profile-empty" class="muted-block" hidden>
+            Нет сохранённых профилей. <button id="btn-add-empty" class="btn-link">Добавить профиль</button>
+        </div>
+        <div id="profile-controls" class="row" hidden>
+            <select id="profile-select" class="field-select" title="Профиль"></select>
+            <button id="btn-add"    class="btn btn-ghost btn-icon" title="Новый профиль">＋</button>
+            <button id="btn-edit"   class="btn btn-ghost btn-icon" title="Редактировать профиль">✎</button>
+            <button id="btn-delete" class="btn btn-ghost btn-icon" title="Удалить профиль">🗑</button>
+        </div>
         <div class="row">
             <button id="btn-connect" class="btn btn-primary">Connect</button>
             <button id="btn-disconnect" class="btn btn-ghost" disabled>Disconnect</button>
@@ -41,6 +47,7 @@
     <section class="card status-card">
         <h2>Статус</h2>
         <dl class="kv">
+            <dt>Profile</dt><dd id="s-profile">—</dd>
             <dt>Transport</dt><dd id="s-transport">—</dd>
             <dt>Meeting</dt><dd id="s-meeting" class="mono">—</dd>
             <dt>Local UDP</dt><dd id="s-local" class="mono">—</dd>
@@ -65,6 +72,74 @@
         <div id="log" class="log log-hide-trace"></div>
     </section>
 </main>
+
+<!-- ─── Profile modal ─────────────────────────────────────────── -->
+<dialog id="profile-dialog" class="modal">
+    <form method="dialog" id="profile-form" class="modal-body">
+        <h3 id="profile-dialog-title">Новый профиль</h3>
+
+        <label class="field-label" for="pf-name">Имя</label>
+        <input id="pf-name" class="field" type="text" autocomplete="off" placeholder="например, Goloom — рабочий"/>
+
+        <div class="tabs">
+            <button type="button" class="tab tab-active" data-tab="connstr">Connstr</button>
+            <button type="button" class="tab" data-tab="manual">Вручную</button>
+        </div>
+
+        <div class="tab-pane" data-pane="connstr">
+            <label class="field-label" for="pf-connstr">Connection string из админки</label>
+            <textarea id="pf-connstr" class="field" rows="3" autocomplete="off"
+                      placeholder="goloom://eyJ..."></textarea>
+        </div>
+
+        <div class="tab-pane" data-pane="manual" hidden>
+            <label class="field-label" for="pf-transport">Транспорт</label>
+            <select id="pf-transport" class="field-select">
+                <option value="telemost">Telemost</option>
+                <option value="livekit-wb-stream">WB Stream (LiveKit)</option>
+            </select>
+
+            <div class="manual-fields" data-for="telemost">
+                <label class="field-label" for="pf-meeting">Meeting URL</label>
+                <input id="pf-meeting" class="field" type="text" autocomplete="off"
+                       placeholder="https://telemost.yandex.ru/j/..."/>
+            </div>
+
+            <div class="manual-fields" data-for="livekit-wb-stream" hidden>
+                <label class="field-label" for="pf-lk-room">Room URL</label>
+                <input id="pf-lk-room" class="field" type="text" autocomplete="off"
+                       placeholder="https://stream.wb.ru/room/..."/>
+                <label class="field-label" for="pf-lk-token">Access token</label>
+                <input id="pf-lk-token" class="field" type="text" autocomplete="off"/>
+                <label class="field-label" for="pf-lk-cookies">Cookies</label>
+                <input id="pf-lk-cookies" class="field" type="text" autocomplete="off"
+                       placeholder="_wbafp=...; x_wbaas_token=..."/>
+            </div>
+
+            <label class="field-label" for="pf-listen">Local UDP listen (optional)</label>
+            <input id="pf-listen" class="field" type="text" autocomplete="off"
+                   placeholder="127.0.0.1:51820"/>
+        </div>
+
+        <span id="profile-dialog-error" class="err"></span>
+        <div class="row modal-actions">
+            <button id="btn-profile-save" class="btn btn-primary" type="button">Сохранить</button>
+            <button class="btn btn-ghost" type="button" data-close-dialog>Отмена</button>
+        </div>
+    </form>
+</dialog>
+
+<!-- ─── Confirm-delete modal ─────────────────────────────────── -->
+<dialog id="confirm-dialog" class="modal">
+    <form method="dialog" class="modal-body">
+        <h3>Удалить профиль?</h3>
+        <p id="confirm-text" class="muted-block">…</p>
+        <div class="row modal-actions">
+            <button id="btn-confirm-yes" class="btn btn-danger" type="button">Удалить</button>
+            <button class="btn btn-ghost" type="button" data-close-dialog>Отмена</button>
+        </div>
+    </form>
+</dialog>
 
 <script src="/main.js" type="module"></script>
 </body>

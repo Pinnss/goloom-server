@@ -175,8 +175,103 @@ main {
 }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-2); }
 .btn-xs { padding: 3px 8px; font-size: 11px; }
+.btn-icon { padding: 4px 8px; font-size: 13px; line-height: 1; }
+.btn-link {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    font-size: inherit;
+    padding: 0;
+}
+.btn-link:hover { color: #6deb83; }
+.btn-danger {
+    background: var(--danger);
+    color: #fff;
+    border: 1px solid var(--danger);
+}
+.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
 
 .err { color: var(--danger); }
+.muted-block { color: var(--muted); font-size: 12px; padding: 4px 0; }
+
+/* Select element styled like our text fields. */
+.field-select {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--slate-100);
+    padding: 6px 9px;
+    font-size: 12px;
+    flex: 1;
+    min-width: 0;
+}
+.field-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(76, 217, 100, 0.20);
+}
+
+/* ─── Modal (<dialog>) ──────────────────────────────────────── */
+
+.modal {
+    background: var(--card);
+    color: var(--slate-100);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0;
+    width: min(520px, calc(100vw - 2rem));
+    max-height: calc(100vh - 4rem);
+    overflow: auto;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal::backdrop {
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(2px);
+}
+.modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 18px;
+    margin: 0;
+}
+.modal-body h3 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+.modal-actions {
+    margin-top: 6px;
+    justify-content: flex-end;
+}
+
+/* Tab strip inside the modal. */
+.tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-top: 4px;
+}
+.tab {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+.tab:hover { color: var(--slate-200); }
+.tab.tab-active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.tab-pane { display: flex; flex-direction: column; gap: 6px; }
+.tab-pane[hidden] { display: none; }
+.manual-fields[hidden] { display: none; }
 
 .kv {
     display: grid;
