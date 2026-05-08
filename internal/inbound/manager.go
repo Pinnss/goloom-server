@@ -94,22 +94,34 @@ func (m *Manager) SetOnChange(fn func()) {
 }
 
 // SetCaptchaBroker installs the broker used by VK Calls inbounds
-// running in captcha_mode=admin-webview. Call once at startup before
-// any inbound is added. Pass nil to disable admin-webview solving
-// (auto/none modes still work).
+// running in captcha_mode=admin-webview. Pass nil to disable
+// admin-webview solving (auto/none modes still work).
+//
+// Безопасно вызывать после mgr.Add — broker пропагируется во все
+// уже существующие runners. Раньше этот сеттер только писал в поле
+// Manager'а, и runners созданные до его вызова навсегда оставались с
+// nil broker'ом — приходилось тоглить инбаунды через админку чтобы
+// «подхватить».
 func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
 	m.mu.Lock()
 	m.captchaBroker = b
+	for _, e := range m.entries {
+		e.runner.SetCaptchaBroker(b)
+	}
 	m.mu.Unlock()
 }
 
 // SetVKProfileStore installs the browser-FP pool used by VK Calls
 // inbounds for auto-replay (S1c). Когда задан — captcha решается
 // автоматически из пула, при провале — фоллбэк на interactive solver.
-// Call once at startup. Pass nil to disable auto-replay.
+// Pass nil to disable auto-replay. Пропагируется в существующие
+// runners (см. [SetCaptchaBroker] про rationale).
 func (m *Manager) SetVKProfileStore(s *vkcalls.ProfileStore) {
 	m.mu.Lock()
 	m.vkProfileStore = s
+	for _, e := range m.entries {
+		e.runner.SetVKProfileStore(s)
+	}
 	m.mu.Unlock()
 }
 

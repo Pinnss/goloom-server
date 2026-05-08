@@ -108,15 +108,15 @@ func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role string
 
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	hdr := http.Header{}
-	// Origin/Referer/UA должны совпадать с auth-ладдером — VK SFU
-	// ассоциирует WS-сессию с теми же fingerprint'ами что были у
-	// API-запросов на token. См. comment в [AuthResult.Profile].
-	hdr.Set("Origin", "https://vk.ru")
-	hdr.Set("Referer", "https://vk.ru/")
+	// WS-заголовки для videowebrtc.okcdn.ru — оставляем pre-S1a
+	// значения (vk.com origin + UA). Эмпирически: смена origin на
+	// vk.ru ломает SFU-signaling (handshake проходит, "connection"
+	// notification приходит, дальше тишина — SFU перестаёт пушить
+	// participant-joined / transmit-data). Auth-ладдер ходит на
+	// api.vk.ru с vk.ru origin'ом — это OK; SFU WS другой стек.
+	hdr.Set("Origin", "https://vk.com")
+	hdr.Set("Referer", "https://vk.com/")
 	hdr.Set("User-Agent", auth.Profile.UserAgent)
-	hdr.Set("sec-ch-ua", auth.Profile.SecChUa)
-	hdr.Set("sec-ch-ua-mobile", auth.Profile.SecChUaMobile)
-	hdr.Set("sec-ch-ua-platform", auth.Profile.SecChUaPlatform)
 
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
