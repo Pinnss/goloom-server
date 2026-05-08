@@ -17,8 +17,19 @@ import (
 )
 
 const (
-	// ~3 Mbit/s per video tunnel at 240×180: Annex B I_PCM frame ≈ 69.5 KiB → FPS ≈ 3e6/(8*69508) ≈ 5.4.
-	EncodeFPS      = 10
+	// EncodeFPS=30 matches VK SFU's advertised camera maxFramerate.
+	// Bumping to 60 was tried — it pumps frames at 60 fps end-to-end
+	// (server-side videocode-rx confirmed ~290 frames_decoded / 5 s)
+	// but doesn't move the needle on TCP-over-tunnel throughput
+	// (560 Kbit/s sustained either way). The bottleneck is downstream
+	// of FPS — likely wgrelay UDP-buffer, Reed-Solomon overhead, or
+	// wireguard-go encrypt path on the client. Leaving at 30 for
+	// predictability; perf tuning is a separate task.
+	//
+	// 240×180 Annex-B I_PCM frame ≈ 69.5 KiB → 30 fps ≈ 16.7 Mbit/s
+	// theoretical wire rate. App-layer payload ceiling after RS
+	// overhead is ~14 Mbit/s.
+	EncodeFPS      = 30
 	FrameInterval  = time.Second / EncodeFPS
 	minH264AUBytes = 400
 	senderQueueCap = 2048

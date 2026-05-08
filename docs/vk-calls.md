@@ -114,10 +114,20 @@ headless solution and lands later.
   dynamic TURN/STUN endpoints from the join response. The client's
   route manager pre-resolves and excludes these from default-route
   capture so our pion sockets aren't swallowed by the WG tunnel.
-- **Throughput.** The videocode tunnel currently runs at FPS=10 with
-  a 240×180 grid; that gives ~3.35 Mbps payload. Bumping FPS or grid
-  size scales linearly toward the 28 Mbps SFU ceiling at the cost of
-  more CPU. Tune in `internal/sfu/vkcalls/videocode/stream.go`.
+- **Throughput (raw video plane).** Bench at FPS=30 × 320×240 fake
+  IDR frames sustained 28 Mbit/s end-to-end through the SFU with 0
+  CRC corruption — the wire ceiling is roughly there.
+- **Throughput (videocode + WG bridge end-to-end).** Real-world
+  TCP-over-tunnel measurement (curl 5MB, iperf3 capped) sits at
+  ~560-600 Kbit/s sustained at FPS=30. Surprising: bumping FPS to
+  60 didn't move the needle — server-side videocode-rx confirmed
+  60 fps decode rate, but TCP throughput stayed flat. The
+  bottleneck is downstream of FPS — likely Reed-Solomon overhead
+  (16% parity), wgrelay UDP-buffer sizing, or wireguard-go
+  encrypt path on the client. Worth a perf-profiling pass before
+  promoting from "validated arch" to "production VPN transport".
+  videocode encode FPS lives at `EncodeFPS` in
+  `internal/sfu/vkcalls/videocode/stream.go`.
 - **Session lifetime.** A fresh `Connect()` is required after a
   rehandshake (token expiry). The supervise loop in
   `pkg/wgclient/service.go` already retries with backoff; for an
