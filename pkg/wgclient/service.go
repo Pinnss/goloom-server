@@ -70,6 +70,12 @@ const (
 // and pushed inside [Event.Status] on every change.
 type Status struct {
 	Phase     Phase     `json:"phase"`
+	// SubPhase — finer-grained step внутри coarse Phase. Например
+	// под Phase=Connecting может быть SubPhase="lobby_dial" или
+	// "captcha". UI рендерит как secondary caption рядом с phase chip.
+	// Совпадает по семантике с mobile/api.go::emitPhase.
+	SubPhase  string    `json:"sub_phase,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
 	Transport string    `json:"transport"` // "telemost" | "livekit-wb-stream"
 	Meeting   string    `json:"meeting,omitempty"`
 	PeerID    string    `json:"peer_id,omitempty"`
@@ -575,6 +581,7 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	// чтобы клиентский target peer сразу взял правильного remote'а
 	// вместо стейл'а из реверс-итерации roster'а.
 	if cfg.LobbyMeetingURL != "" && cfg.Bearer != "" {
+		s.setStatus(func(st *Status) { st.SubPhase = "lobby_join"; st.Detail = "" })
 		serverTargetUID, err := lobbyDial(ctx, lg, cfg.LobbyMeetingURL, cfg.Bearer, cfg.Meeting, cfg.DisplayName)
 		if err != nil {
 			return fmt.Errorf("lobby bootstrap: %w", err)
@@ -583,6 +590,7 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 			os.Setenv("VKCALLS_TARGET_REMOTE_ID", strconv.FormatInt(serverTargetUID, 10))
 			defer os.Unsetenv("VKCALLS_TARGET_REMOTE_ID")
 		}
+		s.setStatus(func(st *Status) { st.SubPhase = "target_connect"; st.Detail = "" })
 	}
 
 	sess, err := transport.Connect(ctx, connectSpec)

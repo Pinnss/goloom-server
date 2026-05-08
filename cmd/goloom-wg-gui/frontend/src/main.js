@@ -94,15 +94,31 @@ function fmtClock(d) {
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function setPhase(phase) {
+// SubPhase coarse → human label. Совпадает с mobile-side
+// ConnectionState.kt humanLabel().
+const subPhaseLabel = {
+    lobby_join:        'Заход в VK лобби',
+    lobby_dial:        'DIAL серверу',
+    captcha:           'Решение captcha',
+    target_connect:    'Peer-join в target',
+    auth:              'VK auth ladder',
+};
+
+function setPhase(phase, sub, detail) {
     els.phase.className = 'chip chip-' + (phase || 'idle');
-    els.phase.textContent = (emojiPhase[phase] || '○') + ' ' + (phase || 'idle');
+    let label = (phase || 'idle');
+    if (sub) {
+        const human = subPhaseLabel[sub] || sub;
+        label = label + ' · ' + human;
+    }
+    if (detail) label = label + ' (' + detail + ')';
+    els.phase.textContent = (emojiPhase[phase] || '○') + ' ' + label;
 }
 
 function applyStatus(st) {
     if (!st) return;
     currentStatus = st;
-    setPhase(st.phase);
+    setPhase(st.phase, st.sub_phase, st.detail);
     els.sTrans.textContent   = st.transport || '—';
     els.sMeeting.textContent = st.meeting || '—';
     els.sLocal.textContent   = st.local_addr || '—';
@@ -296,10 +312,18 @@ async function saveProfileFromDialog() {
                 livekit_access_token: (els.plkToken.value || '').trim(),
                 livekit_cookies:      (els.plkCookies.value || '').trim(),
                 vk_calls_role:        transport === 'vk-calls' ? 'caller' : '',
+                vk_calls_codec:       existing.vk_calls_codec || '',
                 display_name: '',
                 listen_addr: (els.plisten.value || '').trim(),
                 auto_wg: !!els.pAutoWG.checked,
                 wg: existing.wg || {},
+                // Preserve VK lobby bootstrap fields (in-band ctrl
+                // S2/S3) — manual-edit form НЕ должен их затирать,
+                // иначе после редактирования профиль превращается из
+                // lobby в legacy-direct-meeting и Connect фейлится
+                // на сервере (no meeting in inbound).
+                lobby_meeting_url: existing.lobby_meeting_url || '',
+                bearer:            existing.bearer || '',
             };
             saved = await window.go.main.App.SaveProfile(editingProfileId || '', name, cfg);
         }
