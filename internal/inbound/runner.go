@@ -84,6 +84,13 @@ type vkDialReq struct {
 	onClose   func()
 	sessionID string
 	accepted  chan error // фиксируется когда Connect привёл к session или ошибке
+
+	// preAuth — опциональный AuthResult от lobby flow (см.
+	// vkcalls.PreAuthForTarget). Если задан, transport.Connect
+	// реюзит его вместо повторного auth-ladder'а — иначе VK
+	// выдаст другой peer slot и client'ский targetRemoteID
+	// миснёт.
+	preAuth *vkcalls.AuthResult
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
@@ -281,8 +288,13 @@ func (r *Runner) runClientMeetingMode(ctx context.Context) error {
 	// userID который мы получим в target call'е. Это значение летит
 	// в DIAL_OK, чтобы клиент сразу знал кого pick'ать в roster'е
 	// target meeting'а (а не выбирал стейлы реверс-итерацией).
+	//
+	// joinConversationByLink (внутри auth-ladder'а) УЖЕ резервирует
+	// peer slot в target call'е — поэтому AuthResult надо реюзить в
+	// последующем transport.Connect (иначе создастся другой peer slot,
+	// другой userID, mismatch с тем что в DIAL_OK уехал клиенту).
 	preAuthCtx, preAuthCancel := context.WithTimeout(ctx, 60*time.Second)
-	_, serverTargetUID, err := vkcalls.PreAuthForTarget(preAuthCtx, r.Logger, dial.Msg.MeetingURL, r.Spec.DisplayName, solver)
+	preAuthResult, serverTargetUID, err := vkcalls.PreAuthForTarget(preAuthCtx, r.Logger, dial.Msg.MeetingURL, r.Spec.DisplayName, solver)
 	preAuthCancel()
 	if err != nil {
 		_ = lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_FAIL", Reason: "target pre-auth: " + err.Error()})
@@ -312,6 +324,7 @@ func (r *Runner) runClientMeetingMode(ctx context.Context) error {
 		onClose:   nil,
 		sessionID: sessionID,
 		accepted:  make(chan error, 1),
+		preAuth:   preAuthResult,
 	}
 	go func() {
 		// Read accepted чтобы не block'нуть runner'а.
@@ -382,6 +395,9 @@ func (r *Runner) runOneVKSession(parent context.Context, req *vkDialReq) error {
 		return err
 	}
 	cs.VKCalls.MeetingURL = req.meeting
+	if req.preAuth != nil {
+		cs.VKCalls.PreAuthResult = req.preAuth
+	}
 
 	transport, err := sfu.Get(cs.Kind)
 	if err != nil {

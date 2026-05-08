@@ -78,6 +78,9 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 		DeviceID: uuid.NewString(),
 		Solver:   vk.CaptchaSolver,
 	}
+	if pa, ok := vk.PreAuthResult.(*AuthResult); ok && pa != nil {
+		authSpec.PreAuth = pa
+	}
 	auth, err := DoAuth(ctx, lg, authSpec)
 	if err != nil {
 		return nil, fmt.Errorf("vkcalls: auth: %w", err)
