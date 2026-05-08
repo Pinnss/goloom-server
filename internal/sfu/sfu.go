@@ -52,11 +52,25 @@ const (
 	// connection-details → roomToken), see
 	// [github.com/Pinnss/goloom-server/internal/sfu/livekit].
 	KindLiveKitWBStream Kind = "livekit-wb-stream"
+
+	// KindVKCalls — VK Calls anonymous peer-join. We auth via the
+	// public vk.com call-link flow (4-step chain ending in
+	// joinConversationByLink) and join the same SFU as a regular
+	// participant. WireGuard datagrams ride inside an H.264 I_PCM
+	// video track (Reed-Solomon coded) — the SFU is a pure RTP
+	// forwarder so byte integrity survives. See
+	// [github.com/Pinnss/goloom-server/internal/sfu/vkcalls].
+	//
+	// Auth requires a captcha solve; the operator wires their own
+	// solver implementation via VKCallsConnect.CaptchaSolver
+	// (browser pop-up for CLI, webview for GUI, cached token for
+	// headless server, …).
+	KindVKCalls Kind = "vk-calls"
 )
 
 // ConnectSpec is what runner builds and hands to a Transport.Connect.
-// It's a discriminated union — exactly one of Telemost / LiveKitWBStream
-// fields should be non-nil based on Kind.
+// It's a discriminated union — exactly one of Telemost / LiveKitWBStream /
+// VKCalls fields should be non-nil based on Kind.
 type ConnectSpec struct {
 	Kind        Kind
 	DisplayName string
@@ -67,6 +81,9 @@ type ConnectSpec struct {
 
 	// LiveKitWBStream is set when Kind == KindLiveKitWBStream.
 	LiveKitWBStream *LiveKitWBStreamConnect
+
+	// VKCalls is set when Kind == KindVKCalls.
+	VKCalls *VKCallsConnect
 }
 
 // TelemostConnect carries the inputs for the Telemost transport.
@@ -100,6 +117,70 @@ type LiveKitWBStreamConnect struct {
 	Cookies string
 }
 
+// VKCallsConnect carries the inputs for the VK Calls transport.
+//
+// Auth is short-lived (~minutes) and requires a captcha solve, so the
+// caller injects their own [VKCaptchaSolver] suitable for the runtime
+// environment. CLI tools open a browser pop-up; GUI clients show a
+// webview; headless servers cache a pre-solved token via the admin
+// webview-auth flow.
+//
+// Role determines which side of the call we play: "caller" creates the
+// SDP offer, "receiver" answers. For the standard goloom topology the
+// server pretends to be receiver (joins first, waits) and clients are
+// callers (join second, drive offer). One link can only host one
+// caller+receiver pair at a time.
+type VKCallsConnect struct {
+	// MeetingURL — full VK call share link (https://vk.com/call/join/<id>)
+	// or just the bare <id> short string.
+	MeetingURL string
+
+	// Role is "caller" or "receiver". Empty defaults to "receiver"
+	// (server-side default — clients should set this explicitly).
+	Role string
+
+	// CaptchaSolver, when non-nil, is invoked when VK demands a
+	// captcha during anonymous-login. Nil means the connect fails
+	// fast on a captcha challenge — only useful for replay tests
+	// where a pre-solved token has been baked into AuthOverride.
+	CaptchaSolver VKCaptchaSolver
+}
+
+// VKCaptchaSolver is invoked when VK's anonymous-login surface
+// demands an "I'm not a robot" checkbox solve. Implementations are
+// runtime-specific:
+//   - CLI tools (goloom-wg-client) open a local reverse-proxy and
+//     auto-launch the user's default browser
+//   - GUI clients (goloom-wg-gui) show the captcha in their own
+//     webview component
+//   - Headless servers fetch a cached token from the admin panel
+//     (replenished by an operator via the same flow)
+//
+// The solver is allowed to block until the user/operator finishes
+// the challenge — auth honours ctx for cancellation/timeout.
+type VKCaptchaSolver func(ctx context.Context, ch VKCaptchaChallenge) (VKCaptchaSolution, error)
+
+// VKCaptchaChallenge is what VK hands us when it wants a captcha
+// proven. RedirectURI is the URL to open in a browser/webview (it
+// renders the I-am-not-a-robot widget); the SessionToken /
+// Sid / Ts triple is needed to complete the round-trip on VK's
+// captchaNotRobot.check endpoint.
+type VKCaptchaChallenge struct {
+	Sid          string
+	Ts           float64
+	Attempt      string
+	RedirectURI  string
+	SessionToken string
+}
+
+// VKCaptchaSolution is what the solver returns once the user has
+// passed the challenge. SuccessToken is what gets re-sent on the
+// next anonymous-login attempt (within ~minutes — tokens expire
+// fast).
+type VKCaptchaSolution struct {
+	SuccessToken string
+}
+
 // Validate returns nil if the spec is internally consistent, else a
 // descriptive error. Transport implementations call this before
 // expensive setup work.
@@ -125,6 +206,17 @@ func (c *ConnectSpec) Validate() error {
 		}
 		if lk.AccessToken == "" {
 			return errors.New("sfu: LiveKitWBStream.AccessToken is empty (operator needs to re-auth via admin webview)")
+		}
+	case KindVKCalls:
+		vk := c.VKCalls
+		if vk == nil {
+			return errors.New("sfu: VKCalls spec required for Kind=vk-calls")
+		}
+		if vk.MeetingURL == "" {
+			return errors.New("sfu: VKCalls.MeetingURL is empty")
+		}
+		if vk.Role != "" && vk.Role != "caller" && vk.Role != "receiver" {
+			return fmt.Errorf("sfu: VKCalls.Role must be \"caller\" or \"receiver\" (got %q)", vk.Role)
 		}
 	default:
 		return fmt.Errorf("sfu: unknown Kind %q", c.Kind)
