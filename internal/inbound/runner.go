@@ -276,7 +276,26 @@ func (r *Runner) runClientMeetingMode(ctx context.Context) error {
 	sessionID := newSessionID()
 	r.Logger.Printf("VK lobby: DIAL accepted from %d → session=%s meeting=%s",
 		dial.From, sessionID, redactMeetingPrefix(dial.Msg.MeetingURL))
-	if err := lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_OK", SessionID: sessionID}); err != nil {
+
+	// Pre-auth target meeting'а: пройти auth ladder и узнать
+	// userID который мы получим в target call'е. Это значение летит
+	// в DIAL_OK, чтобы клиент сразу знал кого pick'ать в roster'е
+	// target meeting'а (а не выбирал стейлы реверс-итерацией).
+	preAuthCtx, preAuthCancel := context.WithTimeout(ctx, 60*time.Second)
+	_, serverTargetUID, err := vkcalls.PreAuthForTarget(preAuthCtx, r.Logger, dial.Msg.MeetingURL, r.Spec.DisplayName, solver)
+	preAuthCancel()
+	if err != nil {
+		_ = lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_FAIL", Reason: "target pre-auth: " + err.Error()})
+		lobby.Close()
+		return fmt.Errorf("pre-auth target: %w", err)
+	}
+	r.Logger.Printf("VK lobby: target pre-auth ✓ server target userID=%d", serverTargetUID)
+
+	if err := lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{
+		Type:               "DIAL_OK",
+		SessionID:          sessionID,
+		ServerTargetUserID: serverTargetUID,
+	}); err != nil {
 		r.Logger.Printf("VK lobby: send DIAL_OK failed: %v", err)
 		// Продолжаем всё равно — клиент может ретрайнуться.
 	}

@@ -599,6 +599,14 @@ func (p *peer) handleTransmittedData(msg map[string]any) {
 			Detail:     stringField(data, "detail"),
 			Reason:     stringField(data, "reason"),
 		}
+		if v, ok := data["server_target_user_id"].(float64); ok {
+			ctrl.ServerTargetUserID = int64(v)
+		} else if s, ok := data["server_target_user_id"].(string); ok {
+			// JSON может прислать как строку если userID > 2^53.
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				ctrl.ServerTargetUserID = n
+			}
+		}
 		if p.controlListener != nil {
 			p.controlListener(from, ctrl)
 		}

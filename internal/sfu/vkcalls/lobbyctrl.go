@@ -35,6 +35,13 @@ type GoloomCtrl struct {
 	Phase      string `json:"phase,omitempty"`
 	Detail     string `json:"detail,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+
+	// ServerTargetUserID (in DIAL_OK) — userID который сервер
+	// получит когда peer-join'ится в target meeting. Pre-auth
+	// делается ДО DIAL_OK так что сервер это знает заранее.
+	// Клиент использует это значение как targetRemoteID для
+	// своего peer'а в target call'е, обходя засранный roster.
+	ServerTargetUserID int64 `json:"server_target_user_id,omitempty"`
 }
 
 // IncomingCtrl — control сообщение пришедшее от другого peer'а в

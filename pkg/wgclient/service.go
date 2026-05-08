@@ -34,6 +34,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -566,9 +568,20 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	// VK звонок, находим там сервер, шлём goloom_ctrl DIAL с meeting
 	// URL'ом, ждём DIAL_OK, выходим из lobby. Сервер на DIAL уходит
 	// в target. Дальше обычный transport.Connect на target.
+	//
+	// DIAL_OK содержит server_target_user_id — userID который сервер
+	// получит в target meeting'е. Прокидываем его как override через
+	// VKCALLS_TARGET_REMOTE_ID env var (читается peer.go::dialPeer),
+	// чтобы клиентский target peer сразу взял правильного remote'а
+	// вместо стейл'а из реверс-итерации roster'а.
 	if cfg.LobbyMeetingURL != "" && cfg.Bearer != "" {
-		if err := lobbyDial(ctx, lg, cfg.LobbyMeetingURL, cfg.Bearer, cfg.Meeting, cfg.DisplayName); err != nil {
+		serverTargetUID, err := lobbyDial(ctx, lg, cfg.LobbyMeetingURL, cfg.Bearer, cfg.Meeting, cfg.DisplayName)
+		if err != nil {
 			return fmt.Errorf("lobby bootstrap: %w", err)
+		}
+		if serverTargetUID != 0 {
+			os.Setenv("VKCALLS_TARGET_REMOTE_ID", strconv.FormatInt(serverTargetUID, 10))
+			defer os.Unsetenv("VKCALLS_TARGET_REMOTE_ID")
 		}
 	}
 

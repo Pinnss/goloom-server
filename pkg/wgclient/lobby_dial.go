@@ -22,14 +22,16 @@ import (
 )
 
 // lobbyDial выполняет один DIAL раунд через lobby. На успех
-// возвращается nil — сервер пошёл в target meeting, можно начинать
-// обычный SFU dial с этой стороны.
-func lobbyDial(ctx context.Context, lg *log.Logger, lobbyMeeting, bearer, targetMeeting, displayName string) error {
+// возвращается serverTargetUID — userID который сервер получит в
+// target meeting'е (pre-authed). Клиент использует его как
+// targetRemoteID для своего peer'а в target call'е, обходя
+// засранный roster.
+func lobbyDial(ctx context.Context, lg *log.Logger, lobbyMeeting, bearer, targetMeeting, displayName string) (int64, error) {
 	if targetMeeting == "" {
-		return errors.New("lobby dial: target meeting URL required")
+		return 0, errors.New("lobby dial: target meeting URL required")
 	}
 
-	dctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	lg.Printf("lobby: peer-joining %s for DIAL bootstrap", lobbyMeeting)
@@ -43,7 +45,7 @@ func lobbyDial(ctx context.Context, lg *log.Logger, lobbyMeeting, bearer, target
 		CaptchaSolver: solver,
 	})
 	if err != nil {
-		return fmt.Errorf("open lobby peer: %w", err)
+		return 0, fmt.Errorf("open lobby peer: %w", err)
 	}
 	defer lobby.Close()
 
@@ -60,9 +62,9 @@ func lobbyDial(ctx context.Context, lg *log.Logger, lobbyMeeting, bearer, target
 	for serverID == 0 {
 		select {
 		case <-dctx.Done():
-			return fmt.Errorf("lobby: timed out waiting for server peer: %w", dctx.Err())
+			return 0, fmt.Errorf("lobby: timed out waiting for server peer: %w", dctx.Err())
 		case <-deadline.C:
-			return errors.New("lobby: no server peer in roster after 20s — is server inbound running?")
+			return 0, errors.New("lobby: no server peer in roster after 20s — is server inbound running?")
 		case <-tick.C:
 			serverID = lobby.RemotePeerID()
 		}
@@ -74,24 +76,25 @@ func lobbyDial(ctx context.Context, lg *log.Logger, lobbyMeeting, bearer, target
 		MeetingURL: targetMeeting,
 		Bearer:     bearer,
 	}); err != nil {
-		return fmt.Errorf("lobby: send DIAL: %w", err)
+		return 0, fmt.Errorf("lobby: send DIAL: %w", err)
 	}
 
 	// Ждём DIAL_OK / DIAL_FAIL.
 	for {
 		select {
 		case <-dctx.Done():
-			return fmt.Errorf("lobby: timed out waiting for DIAL response: %w", dctx.Err())
+			return 0, fmt.Errorf("lobby: timed out waiting for DIAL response: %w", dctx.Err())
 		case msg, ok := <-lobby.Incoming():
 			if !ok {
-				return errors.New("lobby: incoming channel closed")
+				return 0, errors.New("lobby: incoming channel closed")
 			}
 			switch msg.Msg.Type {
 			case "DIAL_OK":
-				lg.Printf("lobby: ✓ DIAL_OK session=%s", msg.Msg.SessionID)
-				return nil
+				lg.Printf("lobby: ✓ DIAL_OK session=%s server_target_user_id=%d",
+					msg.Msg.SessionID, msg.Msg.ServerTargetUserID)
+				return msg.Msg.ServerTargetUserID, nil
 			case "DIAL_FAIL":
-				return fmt.Errorf("lobby: server rejected DIAL: %s", msg.Msg.Reason)
+				return 0, fmt.Errorf("lobby: server rejected DIAL: %s", msg.Msg.Reason)
 			default:
 				lg.Printf("lobby: ignoring unexpected ctrl type=%s", msg.Msg.Type)
 			}

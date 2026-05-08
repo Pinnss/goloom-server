@@ -182,3 +182,36 @@ func (lp *LobbyPeer) Close() {
 func (lp *LobbyPeer) Done() <-chan struct{} {
 	return lp.peer.Done()
 }
+
+// PreAuthForTarget прогоняет полный VK auth ladder для нужного
+// meeting URL'а БЕЗ open'а WS / peer'а / PC. Используется server'ом
+// в lobby flow: сразу после DIAL'а нам нужен target userID который
+// мы получим когда peer-join'имся, чтобы положить его в DIAL_OK
+// для клиента (тот будет targetRemoteID).
+//
+// Возвращает userID + peerID + полную AuthResult — последняя нужна
+// для опционального reuse'а если caller хочет skip'нуть второй
+// auth-ladder в Transport.Connect.
+func PreAuthForTarget(ctx context.Context, lg *log.Logger, meetingURL, displayName string, solver sfu.VKCaptchaSolver) (*AuthResult, int64, error) {
+	if meetingURL == "" {
+		return nil, 0, errors.New("vkcalls/lobby: PreAuthForTarget: meetingURL required")
+	}
+	if solver == nil {
+		return nil, 0, errors.New("vkcalls/lobby: PreAuthForTarget: solver required")
+	}
+	shortID := extractShortID(meetingURL)
+	if shortID == "" {
+		return nil, 0, fmt.Errorf("vkcalls/lobby: cannot extract short id from %q", meetingURL)
+	}
+	auth, err := DoAuth(ctx, lg, AuthSpec{
+		ShortID:  shortID,
+		Name:     identity.NameOrGenerate(displayName),
+		DeviceID: uuid.NewString(),
+		Solver:   solver,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("pre-auth target: %w", err)
+	}
+	uid := parseWSUserID(auth.WSEndpoint)
+	return auth, uid, nil
+}
