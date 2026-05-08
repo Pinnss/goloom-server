@@ -330,8 +330,15 @@ PersistentKeepalive = 25
 // operator distributes the .conf out-of-band.
 func buildConnStr(spec inbound.Spec) (string, error) {
 	p := &connstr.Params{
-		Meeting: spec.Meeting,
-		Tag:     spec.Tag,
+		Meeting:   spec.Meeting,
+		Tag:       spec.Tag,
+		Transport: spec.Transport, // empty stays empty (== telemost default)
+	}
+	// VK Calls ships its own MeetingURL in the per-transport sub-spec —
+	// the generic Spec.Meeting may be empty when the operator typed the
+	// link into the VK form. Prefer that.
+	if spec.VKCalls != nil && spec.VKCalls.MeetingURL != "" {
+		p.Meeting = spec.VKCalls.MeetingURL
 	}
 	if spec.ClientWGPrivateKey != "" && spec.ServerWGPublicKey != "" && spec.WGSubnet != "" {
 		p.WGClientPrivate = spec.ClientWGPrivateKey

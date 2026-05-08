@@ -18,6 +18,12 @@ type Params struct {
 	PSK         string `json:"psk,omitempty"`
 	Tag         string `json:"tag,omitempty"`
 
+	// Transport names the SFU/transport implementation to use.
+	// Empty == "telemost" for backward compatibility with connstrs
+	// generated before multi-transport. Mirrors
+	// [github.com/Pinnss/goloom-server/internal/sfu].Kind values.
+	Transport string `json:"t,omitempty"`
+
 	// WG-related fields. Populated by the admin panel when an inbound
 	// has been auto-provisioned, so the client can build its WG config
 	// from a single connection string instead of having the user copy a

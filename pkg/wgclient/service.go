@@ -154,8 +154,11 @@ func (w WGParams) Valid() bool {
 }
 
 // FromConnStr decodes a goloom:// connection string into a [Config].
-// Only Telemost connstrings are supported today; WB-Stream credentials
-// arrive via the admin webview-auth flow, not the connstr.
+// Connstrs created before multi-transport implicitly resolve to
+// transport=telemost (Params.Transport == ""); newer connstrs carry
+// the transport explicitly. WB-Stream credentials still arrive
+// out-of-band (admin webview-auth flow) — they're never embedded in
+// the connstr.
 //
 // If the connstr embeds WG client params (admin panel's auto-provision
 // flow), they're carried into Config.WG so the GUI can offer auto-WG
@@ -165,11 +168,19 @@ func FromConnStr(s string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	transport := p.Transport
+	if transport == "" {
+		transport = "telemost"
+	}
 	cfg := Config{
-		Transport:   "telemost",
+		Transport:   transport,
 		Meeting:     p.Meeting,
 		DisplayName: p.DisplayName,
 		ListenAddr:  "127.0.0.1:51820",
+	}
+	// VK Calls clients are the call originator by convention.
+	if transport == "vk-calls" {
+		cfg.VKCallsRole = "caller"
 	}
 	if p.HasWG() {
 		cfg.WG = WGParams{
