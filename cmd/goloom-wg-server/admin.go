@@ -8,6 +8,7 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/admin"
 	"github.com/Pinnss/goloom-server/internal/inbound"
+	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/internal/wgprovision"
 )
 
@@ -59,6 +60,19 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 	// wiring honest about the shared state.
 	captchaBroker := admin.NewCaptchaBroker()
 	mgr.SetCaptchaBroker(captchaBroker)
+
+	// VK fingerprint pool — копит device/browser_fp/UA из ручных
+	// captcha-solve'ов оператором. Файл рядом с admin.json.
+	// Ошибка инициализации не должна валить старт сервера —
+	// без стора captcha-broker работает как раньше.
+	vkProfilePath := filepath.Join(filepath.Dir(cfg.path), "vkcalls", "profiles.json")
+	vkProfileStore, err := vkcalls.NewProfileStore(vkcalls.ProfileStoreOptions{Path: vkProfilePath})
+	if err != nil {
+		lg.Printf("WARN: vkcalls profile store unavailable (%v); captcha-fingerprint capture disabled", err)
+	} else {
+		captchaBroker.SetFingerprintSink(vkProfileStore, lg)
+		lg.Printf("vkcalls fingerprint pool: %s (%d profiles loaded)", vkProfilePath, len(vkProfileStore.Snapshot()))
+	}
 
 	srv, err := admin.New(admin.Options{
 		Listen:         cfg.Admin.Listen,

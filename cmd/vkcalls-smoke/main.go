@@ -82,7 +82,7 @@ func main() {
 		VKCalls: &sfu.VKCallsConnect{
 			MeetingURL:    *link,
 			Role:          *role,
-			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(*timeout, lg),
+			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(*timeout, lg, nil),
 		},
 	}
 

@@ -47,9 +47,13 @@ import (
 // a local reverse-proxy + the user's default browser, then waits for
 // the success_token to flow back through the proxy. Default for CLI
 // tooling on a workstation.
-func AutoProxyCaptchaSolver(timeout time.Duration, lg *log.Logger) sfu.VKCaptchaSolver {
+//
+// sink — опциональный [CaptureSink] (обычно [*ProfileStore]); если
+// задан, перехваченные device/browser_fp/UA отправятся туда для
+// будущего auto-replay. Передавай nil если не используешь стор.
+func AutoProxyCaptchaSolver(timeout time.Duration, lg *log.Logger, sink CaptureSink) sfu.VKCaptchaSolver {
 	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
-		tok, err := solveCaptchaViaProxy(ctx, ch.RedirectURI, timeout, lg)
+		tok, err := solveCaptchaViaProxy(ctx, ch.RedirectURI, timeout, lg, sink)
 		if err != nil {
 			return sfu.VKCaptchaSolution{}, err
 		}
@@ -143,6 +147,19 @@ type proxyMount struct {
 	transport        http.RoundTripper
 }
 
+// MountAdminCaptchaProxyOptions конфигурирует [MountAdminCaptchaProxy].
+//
+// FingerprintSink — опциональный сборщик device/browser_fp/UA,
+// перехватывает тела `captchaNotRobot.componentDone` и `.check` пока
+// они проходят через reverse-proxy. Передаётся обычно как
+// `*ProfileStore`; nil → перехвата нет (legacy-поведение).
+//
+// Logger — лог для loggingTransport diagnostics; nil → silent.
+type MountAdminCaptchaProxyOptions struct {
+	FingerprintSink CaptureSink
+	Logger          *log.Logger
+}
+
 // MountAdminCaptchaProxy installs the captcha proxy + JS shim
 // handlers under urlPrefix on mux. urlPrefix must start with "/" and
 // not end with "/" (e.g. "/captcha-proxy/abc123"). target is the
@@ -150,9 +167,14 @@ type proxyMount struct {
 // fires when a success_token is captured (server-side or via the JS
 // shim's POST fallback).
 //
+// Если opts.FingerprintSink задан — поверх defaultTransport
+// натягивается [loggingTransport], который параллельно с обычным
+// proxying извлекает device/browser_fp/UA и кормит их в sink (для
+// будущего auto-replay, см. [ProfileStore]).
+//
 // Used by [internal/admin].CaptchaBroker; sites without an admin
 // server should use [AutoProxyCaptchaSolver] instead.
-func MountAdminCaptchaProxy(mux *http.ServeMux, urlPrefix string, target *neturl.URL, onToken func(string)) error {
+func MountAdminCaptchaProxy(mux *http.ServeMux, urlPrefix string, target *neturl.URL, onToken func(string), opts MountAdminCaptchaProxyOptions) error {
 	if mux == nil {
 		return errors.New("vkcalls: MountAdminCaptchaProxy: mux is nil")
 	}
@@ -162,11 +184,15 @@ func MountAdminCaptchaProxy(mux *http.ServeMux, urlPrefix string, target *neturl
 	if !strings.HasPrefix(urlPrefix, "/") || strings.HasSuffix(urlPrefix, "/") {
 		return fmt.Errorf("vkcalls: MountAdminCaptchaProxy: urlPrefix %q must start with / and not end with /", urlPrefix)
 	}
+	transport := http.RoundTripper(defaultTransport())
+	if opts.FingerprintSink != nil {
+		transport = NewLoggingTransport(transport, opts.FingerprintSink, opts.Logger)
+	}
 	mnt := &proxyMount{
 		target:    target,
 		selfBase:  urlPrefix,
 		onToken:   onToken,
-		transport: defaultTransport(),
+		transport: transport,
 	}
 	mountHandlers(mux, urlPrefix+"/", mnt)
 	return nil
@@ -188,7 +214,7 @@ func AdminCaptchaProxyURL(urlPrefix string, target *neturl.URL) string {
 	return u.String()
 }
 
-func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.Duration, lg *log.Logger) (string, error) {
+func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.Duration, lg *log.Logger, sink CaptureSink) (string, error) {
 	targetURL, err := neturl.Parse(redirectURI)
 	if err != nil {
 		return "", fmt.Errorf("invalid redirect URI: %w", err)
@@ -211,12 +237,16 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 		}
 	}
 
+	transport := http.RoundTripper(defaultTransport())
+	if sink != nil {
+		transport = NewLoggingTransport(transport, sink, lg)
+	}
 	mnt := &proxyMount{
 		target:           targetURL,
 		selfBase:         localCaptchaOrigin(port),
 		selfHostMatchers: localCaptchaHosts(port),
 		onToken:          notifyTok,
-		transport:        defaultTransport(),
+		transport:        transport,
 	}
 
 	mux := http.NewServeMux()

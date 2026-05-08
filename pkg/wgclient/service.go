@@ -626,7 +626,7 @@ func (s *Service) buildConnectSpec(cfg Config) sfu.ConnectSpec {
 			// their workstation and can solve the captcha in 1
 			// click. AutoProxy is the right default for any code
 			// path that builds wgclient.Config.
-			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(2*time.Minute, s.logger),
+			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(2*time.Minute, s.logger, nil),
 		}
 	}
 	return cs

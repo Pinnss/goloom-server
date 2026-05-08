@@ -28,6 +28,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -64,6 +65,13 @@ type CaptchaBroker struct {
 	// per-challenge handlers in a wrapper map and route through it.
 	proxyMu      sync.RWMutex
 	proxyMounted map[string]http.Handler
+
+	// fingerprintSink — стор куда падают перехваченные browser_fp
+	// + device + UA из captchaNotRobot.componentDone/.check во время
+	// ручного solve. nil → перехват выключен (broker работает как
+	// раньше).
+	fingerprintSink vkcalls.CaptureSink
+	logger          *log.Logger
 }
 
 // captchaEntry is one in-flight challenge.
@@ -84,6 +92,17 @@ func NewCaptchaBroker() *CaptchaBroker {
 		pending:      map[string]*captchaEntry{},
 		proxyMounted: map[string]http.Handler{},
 	}
+}
+
+// SetFingerprintSink включает перехват browser_fp/device/UA на
+// captcha-proxy для всех будущих challenges. Должно вызываться один
+// раз при старте сервера, до первого Register; thread-safe но менять
+// sink в runtime нет смысла. Передай nil чтобы выключить.
+func (b *CaptchaBroker) SetFingerprintSink(sink vkcalls.CaptureSink, lg *log.Logger) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fingerprintSink = sink
+	b.logger = lg
 }
 
 // AttachToMux installs the broker's HTTP routes on mux:
@@ -161,9 +180,15 @@ func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge,
 	urlPrefix := captchaURLPrefix + "/" + id
 	// Build a per-challenge mux + mount the proxy handlers there.
 	chMux := http.NewServeMux()
+	b.mu.Lock()
+	mountOpts := vkcalls.MountAdminCaptchaProxyOptions{
+		FingerprintSink: b.fingerprintSink,
+		Logger:          b.logger,
+	}
+	b.mu.Unlock()
 	if err := vkcalls.MountAdminCaptchaProxy(chMux, urlPrefix, target, func(tok string) {
 		b.resolve(id, tok)
-	}); err != nil {
+	}, mountOpts); err != nil {
 		// Should never happen with our params, but if it does, fail
 		// the challenge fast.
 		close(e.done)

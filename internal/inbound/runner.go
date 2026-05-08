@@ -209,7 +209,11 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 		var solver sfu.VKCaptchaSolver
 		switch captchaMode {
 		case "auto":
-			solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger)
+			// S1b: AutoProxy на серверной стороне используется редко
+			// (нужна desktop-сессия), pool профилей живёт под admin
+			// captcha-broker. Передаём nil sink — захвата нет, но и
+			// сценарий маргинальный.
+			solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger, nil)
 		case "none":
 			solver = nil
 		case "admin-webview":
