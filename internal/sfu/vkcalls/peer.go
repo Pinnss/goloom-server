@@ -50,6 +50,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +78,13 @@ type peer struct {
 	pc         *webrtc.PeerConnection
 	videoTrack *webrtc.TrackLocalStaticSample
 	remoteID   int64
+
+	// targetRemoteID — diagnostic override. Если != 0,
+	// adoptParticipants игнорирует roster и сразу адоптит этот UID.
+	// Решает проблему засранного roster'а в тестовых VK-звонках:
+	// зомби-peer'ы от убитых смок-сессий висят в SFU 10-30 минут,
+	// и без override caller'а уносит на них offer.
+	targetRemoteID int64
 
 	// videocode receive pipeline (h264 mode only) — owned by Session
 	// but referenced here so OnTrack can hand the remote track to the
@@ -151,6 +160,15 @@ func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role, codec
 	}
 	if codec == "vp8" {
 		pp.remoteTracks = make(chan *webrtc.TrackRemote, 8)
+	}
+	// VKCALLS_TARGET_REMOTE_ID — диагностический env var: forces
+	// adoptParticipants принять конкретный peer userID. Помогает
+	// в multi-peer тестах когда roster засран зомби-сессиями.
+	if v := os.Getenv("VKCALLS_TARGET_REMOTE_ID"); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id != 0 {
+			pp.targetRemoteID = id
+			lg.Printf("vkcalls: targetRemoteID=%d (env override)", id)
+		}
 	}
 	return pp, nil
 }
@@ -496,16 +514,40 @@ func (p *peer) dispatch(raw []byte) {
 	}
 }
 
-// adoptParticipants picks the first non-self participant from the
-// conversation roster as our remote peer.
+// adoptParticipants picks a non-self participant from the conversation
+// roster as our remote peer. Если задан targetRemoteID — адоптит его
+// без сканирования roster'а (диагностический override).
+//
+// Дефолтная стратегия: итерация с КОНЦА (last in roster) — VK SFU
+// обычно ordering по времени ascending, последний = самый свежий.
+// В реальном 2-peer сценарии (1 server + 1 client) разницы нет.
 func (p *peer) adoptParticipants(raw any, source string) {
+	if p.targetRemoteID != 0 {
+		p.remoteID = p.targetRemoteID
+		p.lg.Printf("vkcalls: remote peer (%s): %d [forced via targetRemoteID]", source, p.remoteID)
+		if p.role == "caller" {
+			p.sendOffer(source)
+		}
+		return
+	}
 	parts, ok := raw.([]any)
 	if !ok {
 		return
 	}
 	myUID := parseWSUserID(p.auth.WSEndpoint)
+	rosterIDs := make([]int64, 0, len(parts))
 	for _, m := range parts {
 		entry, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if f, ok := entry["id"].(float64); ok {
+			rosterIDs = append(rosterIDs, int64(f))
+		}
+	}
+	p.lg.Printf("vkcalls: roster (%s) self=%d others=%v", source, myUID, rosterIDs)
+	for i := len(parts) - 1; i >= 0; i-- {
+		entry, ok := parts[i].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -515,7 +557,7 @@ func (p *peer) adoptParticipants(raw any, source string) {
 		}
 		if id != 0 && id != myUID {
 			p.remoteID = id
-			p.lg.Printf("vkcalls: remote peer (%s): %d", source, id)
+			p.lg.Printf("vkcalls: remote peer (%s): %d (picked from roster size=%d)", source, id, len(parts))
 			if p.role == "caller" {
 				p.sendOffer(source)
 			}
