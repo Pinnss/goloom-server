@@ -52,8 +52,16 @@ import (
 // задан, перехваченные device/browser_fp/UA отправятся туда для
 // будущего auto-replay. Передавай nil если не используешь стор.
 func AutoProxyCaptchaSolver(timeout time.Duration, lg *log.Logger, sink CaptureSink) sfu.VKCaptchaSolver {
+	return AutoProxyCaptchaSolverWithOpener(timeout, lg, sink, openBrowser)
+}
+
+// AutoProxyCaptchaSolverWithOpener — то же что [AutoProxyCaptchaSolver],
+// но использует custom URL opener. Мобильные клиенты передают сюда
+// функцию которая шлёт URL в native WebView (см. mobile/api.go);
+// desktop-вариант идёт через [openBrowser] (system browser).
+func AutoProxyCaptchaSolverWithOpener(timeout time.Duration, lg *log.Logger, sink CaptureSink, openURL func(string)) sfu.VKCaptchaSolver {
 	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
-		tok, err := solveCaptchaViaProxy(ctx, ch.RedirectURI, timeout, lg, sink)
+		tok, err := solveCaptchaViaProxy(ctx, ch.RedirectURI, timeout, lg, sink, openURL)
 		if err != nil {
 			return sfu.VKCaptchaSolution{}, err
 		}
@@ -214,7 +222,10 @@ func AdminCaptchaProxyURL(urlPrefix string, target *neturl.URL) string {
 	return u.String()
 }
 
-func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.Duration, lg *log.Logger, sink CaptureSink) (string, error) {
+func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.Duration, lg *log.Logger, sink CaptureSink, openURL func(string)) (string, error) {
+	if openURL == nil {
+		openURL = openBrowser
+	}
 	targetURL, err := neturl.Parse(redirectURI)
 	if err != nil {
 		return "", fmt.Errorf("invalid redirect URI: %w", err)
@@ -260,8 +271,8 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 	}()
 
 	localURL := localCaptchaURLForTarget(targetURL, port)
-	lg.Printf("captcha-proxy: opening %s in browser", localURL)
-	openBrowser(localURL)
+	lg.Printf("captcha-proxy: opening %s", localURL)
+	openURL(localURL)
 
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

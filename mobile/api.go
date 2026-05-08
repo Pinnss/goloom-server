@@ -77,16 +77,17 @@ type PhaseListener interface {
 	OnPhase(phase string, detail string)
 }
 
-// CaptchaSolver — native-side hook для решения VK captcha. Передаётся
-// challenge URL (https://id.vk.ru/not_robot_captcha?...), native
-// открывает её в WebView с правильным UA + JS-anti-bot масками
-// (см. tun/CaptchaWebViewDialog.kt), захватывает success_token из
-// captchaNotRobot.check ответа и возвращает.
+// BrowserLauncher — native-side hook для открытия URL в WebView.
+// Используется для VK captcha: Go запускает локальный reverse-proxy
+// (см. vkcalls/captcha.go), формирует localhost URL, и просит native
+// открыть его в WebView. Token capture происходит на Go-стороне через
+// JS shim в proxy — native просто рендерит WebView.
 //
-// На таймаут/cancel возвращает "" + non-nil error — auth ladder
-// тогда фейлится с понятным сообщением.
-type CaptchaSolver interface {
-	Solve(challengeURL string) (successToken string, err error)
+// На Android это обычно показ Compose Dialog'а с WebView, настроенного
+// мобильным UA + anti-bot JS-инъекциями (см. tun/CaptchaWebViewDialog.kt).
+// Open вызывается из Go-горутины; native должен поднять UI на main thread.
+type BrowserLauncher interface {
+	Open(url string)
 }
 
 // Client is the singleton-ish tunnel handle. One per VpnService /
@@ -101,7 +102,7 @@ type Client struct {
 
 	phaseMu    sync.Mutex
 	phaseHook  PhaseListener
-	captchaCB  CaptchaSolver
+	browserCB  BrowserLauncher
 
 	connectedTo string
 	displayName string
@@ -154,13 +155,14 @@ func (c *Client) SetPhaseListener(p PhaseListener) {
 	c.phaseMu.Unlock()
 }
 
-// SetCaptchaSolver регистрирует native-side hook на решение VK captcha.
-// Если не задан — captcha challenge на step 1 auth-ладдера фейлится
-// сразу. Native обычно реализует через WebView dialog (см.
-// tun/CaptchaWebViewDialog.kt в проде vk-turn-proxy/Android).
-func (c *Client) SetCaptchaSolver(s CaptchaSolver) {
+// SetBrowserLauncher регистрирует native-side hook на открытие URL в
+// WebView. Используется для VK captcha — Go спавнит local reverse-proxy
+// и просит native открыть localhost URL. Если launcher не задан, Go
+// упадёт обратно на system browser (Linux: xdg-open) — на Android это
+// не работает.
+func (c *Client) SetBrowserLauncher(l BrowserLauncher) {
 	c.phaseMu.Lock()
-	c.captchaCB = s
+	c.browserCB = l
 	c.phaseMu.Unlock()
 }
 

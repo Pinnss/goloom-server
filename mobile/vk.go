@@ -211,27 +211,23 @@ func (c *Client) lobbyDialMobile(parent context.Context, lobbyMeeting, bearer, t
 	}
 }
 
-// buildVKCaptchaSolver оборачивает native CaptchaSolver в
-// sfu.VKCaptchaSolver. На каждый вызов emitPhase("captcha", ...) —
-// UI узнаёт что нужен ручной solve.
+// buildVKCaptchaSolver возвращает captcha solver, который спавнит
+// local reverse-proxy (vkcalls.AutoProxyCaptchaSolverWithOpener) и
+// зовёт native [BrowserLauncher] открыть localhost URL в WebView.
+// Token capture делает proxy через JS shim — native никаких
+// токенов не парсит, просто рендерит UI.
 func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 	c.phaseMu.Lock()
-	native := c.captchaCB
+	launcher := c.browserCB
 	c.phaseMu.Unlock()
-	if native == nil {
+	if launcher == nil {
 		return nil
 	}
-	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
-		c.emitPhase("captcha", "user must solve VK captcha")
-		token, err := native.Solve(ch.RedirectURI)
-		if err != nil {
-			return sfu.VKCaptchaSolution{}, err
-		}
-		if token == "" {
-			return sfu.VKCaptchaSolution{}, errors.New("captcha solver returned empty token")
-		}
-		return sfu.VKCaptchaSolution{SuccessToken: token}, nil
+	opener := func(url string) {
+		c.emitPhase("captcha", "open captcha in WebView")
+		launcher.Open(url)
 	}
+	return vkcalls.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, nil, opener)
 }
 
 // ensure json import for future ConnectResult expansion
