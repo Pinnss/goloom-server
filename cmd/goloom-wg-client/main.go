@@ -24,6 +24,7 @@ func main() {
 	connectStr := flag.String("connect", "", "connection string (goloom://...)")
 	listenAddr := flag.String("listen", "", "override UDP listen address (default 127.0.0.1:51820)")
 	meetingFlag := flag.String("meeting", "", "VK call meeting URL (для client-meeting connstr'ов где meeting в connstr пустой)")
+	autoWG := flag.Bool("auto-wg", false, "включить встроенный wireguard-go (TUN + auto-route) вместо external wg-quick. Требует WG params в connstr.")
 	flag.Parse()
 
 	bootLg := log.New(os.Stdout, "[goloom-wg-boot] ", log.LstdFlags|log.Lmicroseconds)
@@ -37,6 +38,9 @@ func main() {
 	}
 	if *meetingFlag != "" {
 		cfg.Meeting = *meetingFlag
+	}
+	if *autoWG {
+		cfg.AutoWG = true
 	}
 	bootLg.Printf("config loaded: transport=%s meeting=%s listen=%s",
 		cfg.Transport, cfg.Meeting, cfg.ListenAddr)
