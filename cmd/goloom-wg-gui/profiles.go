@@ -306,6 +306,11 @@ func inferName(cfg wgclient.Config) string {
 			return "WB Stream — " + shortenURL(cfg.LiveKitRoomURL)
 		}
 		return "WB Stream"
+	case "vk-calls":
+		if cfg.Meeting != "" {
+			return "VK Calls — " + shortenURL(cfg.Meeting)
+		}
+		return "VK Calls"
 	default:
 		return cfg.Transport
 	}

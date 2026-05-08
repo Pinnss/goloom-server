@@ -44,6 +44,7 @@ const els = {
     plkRoom:        document.getElementById('pf-lk-room'),
     plkToken:       document.getElementById('pf-lk-token'),
     plkCookies:     document.getElementById('pf-lk-cookies'),
+    pvkLink:        document.getElementById('pf-vk-link'),
     plisten:        document.getElementById('pf-listen'),
     pAutoWG:        document.getElementById('pf-autowg'),
     pSaveBtn:       document.getElementById('btn-profile-save'),
@@ -211,7 +212,10 @@ function openProfileDialog(profile) {
     // tab; for add, default to connstr tab (one-paste flow).
     const cfg = profile ? profile.config : {};
     els.ptransport.value = cfg.transport || 'telemost';
-    els.pmeeting.value   = cfg.meeting   || '';
+    // Both Telemost and VK Calls use cfg.meeting — populate whichever
+    // input is visible based on transport.
+    els.pmeeting.value   = cfg.transport === 'vk-calls' ? '' : (cfg.meeting || '');
+    els.pvkLink.value    = cfg.transport === 'vk-calls' ? (cfg.meeting || '') : '';
     els.plkRoom.value    = cfg.livekit_room_url     || '';
     els.plkToken.value   = cfg.livekit_access_token || '';
     els.plkCookies.value = cfg.livekit_cookies      || '';
@@ -279,12 +283,19 @@ async function saveProfileFromDialog() {
             const existing = editingProfileId
                 ? (profiles.find((p) => p.id === editingProfileId) || {}).config || {}
                 : {};
+            const transport = els.ptransport.value;
+            // Meeting field is shared between Telemost and VK Calls
+            // (both take a single URL); pick the right input.
+            const meeting = transport === 'vk-calls'
+                ? (els.pvkLink.value || '').trim()
+                : (els.pmeeting.value || '').trim();
             const cfg = {
-                transport: els.ptransport.value,
-                meeting: (els.pmeeting.value || '').trim(),
+                transport,
+                meeting,
                 livekit_room_url:     (els.plkRoom.value || '').trim(),
                 livekit_access_token: (els.plkToken.value || '').trim(),
                 livekit_cookies:      (els.plkCookies.value || '').trim(),
+                vk_calls_role:        transport === 'vk-calls' ? 'caller' : '',
                 display_name: '',
                 listen_addr: (els.plisten.value || '').trim(),
                 auto_wg: !!els.pAutoWG.checked,

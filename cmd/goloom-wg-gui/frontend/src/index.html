@@ -97,6 +97,7 @@
             <select id="pf-transport" class="field-select">
                 <option value="telemost">Telemost</option>
                 <option value="livekit-wb-stream">WB Stream (LiveKit)</option>
+                <option value="vk-calls">VK Calls (anonymous join)</option>
             </select>
 
             <div class="manual-fields" data-for="telemost">
@@ -114,6 +115,15 @@
                 <label class="field-label" for="pf-lk-cookies">Cookies</label>
                 <input id="pf-lk-cookies" class="field" type="text" autocomplete="off"
                        placeholder="_wbafp=...; x_wbaas_token=..."/>
+            </div>
+
+            <div class="manual-fields" data-for="vk-calls" hidden>
+                <label class="field-label" for="pf-vk-link">VK Call link</label>
+                <input id="pf-vk-link" class="field" type="text" autocomplete="off"
+                       placeholder="https://vk.com/call/join/..."/>
+                <span class="muted-block hint">
+                    При подключении откроется браузер с captcha — один клик «Я не робот» и можно работать.
+                </span>
             </div>
 
             <label class="field-label" for="pf-listen">Local UDP listen (optional)</label>
