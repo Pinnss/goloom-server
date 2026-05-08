@@ -65,6 +65,30 @@ type LogSink interface {
 	Write(line string)
 }
 
+// PhaseListener lets the native side observe high-level connect phases —
+// "auth_ladder", "lobby_dial", "target_handshake" etc. — between
+// Connect() entry and ConnectResult return. Used by mobile UIs to show
+// сменяющиеся статусы вместо одного безмолвного "Connecting..."
+// indicator'а.
+type PhaseListener interface {
+	// OnPhase вызывается каждый раз когда меняется состояние подключения.
+	// Реентерабельно безопасен; native-side обычно проксирует в
+	// StateFlow / @Published.
+	OnPhase(phase string, detail string)
+}
+
+// CaptchaSolver — native-side hook для решения VK captcha. Передаётся
+// challenge URL (https://id.vk.ru/not_robot_captcha?...), native
+// открывает её в WebView с правильным UA + JS-anti-bot масками
+// (см. tun/CaptchaWebViewDialog.kt), захватывает success_token из
+// captchaNotRobot.check ответа и возвращает.
+//
+// На таймаут/cancel возвращает "" + non-nil error — auth ladder
+// тогда фейлится с понятным сообщением.
+type CaptchaSolver interface {
+	Solve(challengeURL string) (successToken string, err error)
+}
+
 // Client is the singleton-ish tunnel handle. One per VpnService /
 // PacketTunnelProvider instance.
 type Client struct {
@@ -75,11 +99,19 @@ type Client struct {
 	logger  *log.Logger
 	logSink LogSink
 
+	phaseMu    sync.Mutex
+	phaseHook  PhaseListener
+	captchaCB  CaptchaSolver
+
 	connectedTo string
 	displayName string
 	listenAddr  string
 	connStr     string
-	lastErr     error
+	// vkTargetMeeting — VK call link, заданный native-стороной из
+	// локального UI поля. В client-meeting режиме (S2/S3) connstr.Meeting
+	// пустой; user вводит meeting сам и Kotlin'ом ставит сюда.
+	vkTargetMeeting string
+	lastErr         error
 
 	// sessionDone сигнализирует supervisor'у конец текущей сессии. Канал
 	// обновляется на каждую новую runSession (peer rehandshake / retry).
@@ -111,6 +143,51 @@ func (c *Client) SetLogSink(s LogSink) {
 	c.mu.Lock()
 	c.logSink = s
 	c.mu.Unlock()
+}
+
+// SetPhaseListener регистрирует native-side hook на изменения фазы
+// подключения. Передавай listener ДО вызова Connect, иначе ранние
+// фазы (auth, lobby) пройдут без notification'ов.
+func (c *Client) SetPhaseListener(p PhaseListener) {
+	c.phaseMu.Lock()
+	c.phaseHook = p
+	c.phaseMu.Unlock()
+}
+
+// SetCaptchaSolver регистрирует native-side hook на решение VK captcha.
+// Если не задан — captcha challenge на step 1 auth-ладдера фейлится
+// сразу. Native обычно реализует через WebView dialog (см.
+// tun/CaptchaWebViewDialog.kt в проде vk-turn-proxy/Android).
+func (c *Client) SetCaptchaSolver(s CaptchaSolver) {
+	c.phaseMu.Lock()
+	c.captchaCB = s
+	c.phaseMu.Unlock()
+}
+
+// SetVKTargetMeeting устанавливает meeting URL для client-meeting
+// режима (S2/S3). Native-side вызывает перед Connect когда у connstr
+// LobbyMeetingURL заполнен, а user из UI ввёл свой meeting URL.
+func (c *Client) SetVKTargetMeeting(url string) {
+	c.mu.Lock()
+	c.vkTargetMeeting = url
+	c.mu.Unlock()
+}
+
+// emitPhase шлёт фазу в native-listener (если есть). Безопасен для
+// вызова из любых горутин.
+func (c *Client) emitPhase(phase, detail string) {
+	c.phaseMu.Lock()
+	hook := c.phaseHook
+	c.phaseMu.Unlock()
+	if hook != nil {
+		hook.OnPhase(phase, detail)
+	}
+	c.logger.Printf("phase: %s%s", phase, func() string {
+		if detail != "" {
+			return " — " + detail
+		}
+		return ""
+	}())
 }
 
 // ConnectResult is what Connect() returns serialised as JSON. Callers
@@ -168,21 +245,35 @@ func (c *Client) Connect(connectionString string, listenAddr string) (string, er
 	c.mu.Lock()
 	c.cancel = cancel
 	c.connectedTo = params.Meeting
+	if params.LobbyMeetingURL != "" && c.vkTargetMeeting != "" {
+		c.connectedTo = c.vkTargetMeeting
+	}
 	c.mu.Unlock()
 
-	// First session is run inline so we can return success/failure to
-	// the native caller. Subsequent reconnects (peer-rehandshake or
-	// transient failures) happen on the supervisor goroutine.
-	res, err := c.runSession(parentCtx, params, listenAddr)
+	c.emitPhase("init", "")
+
+	// Dispatch на нужный transport. Telemost — старый монолитный
+	// session.SetupSession path. VK Calls — lobby flow + vkcalls.Transport.
+	var res ConnectResult
+	switch params.Transport {
+	case "vk-calls":
+		res, err = c.runVKSession(parentCtx, params, listenAddr)
+	case "", "telemost":
+		res, err = c.runSession(parentCtx, params, listenAddr)
+	default:
+		err = fmt.Errorf("unsupported transport %q", params.Transport)
+	}
 	if err != nil {
 		cancel()
 		typed := classify(err)
 		c.recordErr(typed)
+		c.emitPhase("error", typed.Error())
 		return "", typed
 	}
 
 	c.recordErr(nil)
 	c.running.Store(true)
+	c.emitPhase("ready", "")
 	go c.supervise(parentCtx)
 
 	out, _ := json.Marshal(res)
@@ -207,8 +298,10 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	c.displayName = displayName
 	c.mu.Unlock()
 
+	c.emitPhase("resolving", "Telemost edge IPs")
 	telemostIPs, _ := resolveTelemostIPs(params.Meeting)
 
+	c.emitPhase("auth", "Telemost session setup")
 	sess, err := session.SetupSession(ctx, c.logger, params.Meeting, displayName)
 	if err != nil {
 		cancel()
@@ -239,6 +332,7 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	merged := make(chan tunnel.ReceivedFrame, 512)
 	go fanInTracks(ctx, sess, merged, c.logger)
 
+	c.emitPhase("waiting_for_peer", "Telemost peer to join the call")
 	if _, err := sess.WaitForPeer(ctx, 5*time.Minute); err != nil {
 		cancel()
 		sess.Close()
@@ -250,6 +344,7 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
 	cameraSender.Start()
 
+	c.emitPhase("handshake", "exchanging HELLO with peer")
 	peerID, err := session.Handshake(ctx, c.logger, sess, cameraSender, merged, 1)
 	if err != nil {
 		cameraSender.Close()
