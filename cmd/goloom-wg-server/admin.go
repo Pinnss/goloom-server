@@ -85,6 +85,7 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 		Provisioner:    prov,
 		Logger:         lg,
 		CaptchaBroker:  captchaBroker,
+		PublicURL:      cfg.Admin.PublicURL,
 	})
 	if err != nil {
 		return nil, err

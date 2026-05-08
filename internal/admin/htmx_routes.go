@@ -61,7 +61,7 @@ func (s *Server) handleHTMXConnStrToast(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	uri, err := buildConnStr(spec)
+	uri, err := buildConnStr(spec, s.opts.PublicURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

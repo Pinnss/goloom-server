@@ -54,6 +54,13 @@ type Options struct {
 	// future direct-WG mode would use the VPS's public IP here.
 	PublicEndpointHint string
 
+	// PublicURL — внешний URL admin-сервера. Пробрасывается клиенту
+	// в connstr (CtrlURL) для S2/S3 client-meeting mode. Пример:
+	// "https://45.43.89.67:9443". Если пусто, ctrl-ws bootstrap
+	// в connstr не пишется и client-meeting инбаунды доступны
+	// только через ручной ввод URL'а.
+	PublicURL string
+
 	// CaptchaBroker, when non-nil, exposes the VK Calls admin-webview
 	// captcha solver via /captcha-proxy/<id>/* and /api/captcha/*.
 	// The broker is also passed into the inbound.Manager so VK
@@ -106,6 +113,16 @@ func New(opts Options) (*Server, error) {
 	if opts.CaptchaBroker != nil {
 		opts.CaptchaBroker.AttachToMux(mux)
 		mux.HandleFunc("GET /api/captcha/pending", s.handleCaptchaPending)
+	}
+
+	// Ctrl-WS (S2/S3): /ctrl/inbound/<id>?token=<bearer> — клиентский
+	// control channel для VK инбаундов в режиме client-meeting. Auth
+	// делается per-inbound bearer'ом, не сессионной cookie, потому
+	// что клиент — отдельный процесс (goloom-wg-client / GUI / mobile),
+	// не human-driven.
+	if opts.Manager != nil {
+		ctrl := newCtrlServer(opts.Manager, opts.Logger)
+		ctrl.AttachToMux(mux)
 	}
 
 	s.srv = &http.Server{
@@ -183,7 +200,12 @@ func isPublicPath(p string) bool {
 	}
 	// Static assets (Tailwind CSS, HTMX, Alpine, htmx-sse) must be
 	// reachable from the unauthenticated login page.
-	return strings.HasPrefix(p, "/static/")
+	if strings.HasPrefix(p, "/static/") {
+		return true
+	}
+	// Ctrl-WS — auth через per-inbound bearer query param,
+	// session-cookie-flow не применяется.
+	return strings.HasPrefix(p, "/ctrl/")
 }
 
 func isAPIPath(p string) bool {

@@ -10,7 +10,7 @@ import (
 const Scheme = "goloom://"
 
 type Params struct {
-	Meeting     string `json:"m"`
+	Meeting     string `json:"m,omitempty"`
 	DisplayName string `json:"n,omitempty"`
 	KCPMTU      int    `json:"km,omitempty"`
 	KCPSndWnd   int    `json:"ks,omitempty"`
@@ -24,6 +24,21 @@ type Params struct {
 	// [github.com/Pinnss/goloom-server/internal/sfu].Kind values.
 	Transport string `json:"t,omitempty"`
 
+	// Codec — для VK transport: "vp8" / "h264" / "" (h264 default).
+	// Клиент должен совпадать с серверным codec'ом инбаунда.
+	Codec string `json:"c,omitempty"`
+
+	// CtrlURL / CtrlBearer / CtrlInboundID (S2/S3): control-plane WS
+	// для VK client-meeting mode. Если все три заданы — клиент
+	// открывает WS на CtrlURL/ctrl/inbound/<CtrlInboundID>?token=<bearer>
+	// перед тем как стартовать SFU dial; отправляет DIAL с meeting'ом
+	// из локального конфига.
+	//
+	// Пусто → клиент использует Meeting из этой структуры (legacy).
+	CtrlURL       string `json:"cu,omitempty"`
+	CtrlBearer    string `json:"cb,omitempty"`
+	CtrlInboundID string `json:"ci,omitempty"`
+
 	// WG-related fields. Populated by the admin panel when an inbound
 	// has been auto-provisioned, so the client can build its WG config
 	// from a single connection string instead of having the user copy a
@@ -33,6 +48,12 @@ type Params struct {
 	WGClientAddr    string `json:"wga,omitempty"`  // client tunnel address with prefix, e.g. "10.66.1.2/24"
 	WGEndpoint      string `json:"wge,omitempty"`  // endpoint to dial, e.g. "127.0.0.1:51820"
 	WGDNS           string `json:"wgd,omitempty"`  // comma-separated DNS list, e.g. "1.1.1.1,8.8.8.8"
+}
+
+// HasCtrl сообщает, есть ли в connstr данные для ctrl-ws bootstrap'а
+// (S2/S3 client-meeting mode).
+func (p *Params) HasCtrl() bool {
+	return p.CtrlURL != "" && p.CtrlBearer != "" && p.CtrlInboundID != ""
 }
 
 // HasWG reports whether the connection string carries a usable embedded
@@ -85,8 +106,11 @@ func Decode(s string) (*Params, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("json decode: %w", err)
 	}
-	if p.Meeting == "" {
-		return nil, fmt.Errorf("meeting URL is required")
+	// Meeting URL обязателен ИЛИ должен быть ctrl-ws bootstrap. В
+	// client-meeting mode (S2/S3) клиент сам подставляет meeting
+	// из локальной формы, а в connstr оно опускается.
+	if p.Meeting == "" && !p.HasCtrl() {
+		return nil, fmt.Errorf("meeting URL or ctrl-ws bootstrap required")
 	}
 	return &p, nil
 }

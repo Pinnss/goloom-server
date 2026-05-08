@@ -129,6 +129,22 @@ type VKCallsSpec struct {
 	// "vp8" (Telemost-стек). Эксперимент S5: VP8 даёт целевую
 	// throughput ~30+ Mbit/s vs ~600 Kbit/s на H.264.
 	Codec string `yaml:"codec,omitempty" json:"codec,omitempty"`
+
+	// AcceptClientMeeting (S3): meeting URL приходит от клиента
+	// через ctrl-ws DIAL вместо того чтобы быть забит в yaml.
+	// Server inbound в этом режиме идле'т (ws на admin :9443) и
+	// триггерит Transport.Connect только когда клиент DIAL'нул.
+	// Совместимость: false (default) → старое поведение, MeetingURL
+	// в yaml обязателен. true → MeetingURL игнорируется в yaml,
+	// должен прилететь от клиента.
+	AcceptClientMeeting bool `yaml:"accept_client_meeting,omitempty" json:"accept_client_meeting,omitempty"`
+
+	// CtrlBearer (S2) — shared secret для авторизации клиентского
+	// ctrl-ws подключения. Если пусто и AcceptClientMeeting=true,
+	// генерируется автоматически при первом старте и зашивается в
+	// yaml (для воспроизводимости между рестартами). Клиент получает
+	// его в connstr.
+	CtrlBearer string `yaml:"ctrl_bearer,omitempty" json:"ctrl_bearer,omitempty"`
 }
 
 // Status is the live snapshot the admin panel renders. Not persisted.

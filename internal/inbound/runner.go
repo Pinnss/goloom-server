@@ -2,6 +2,8 @@ package inbound
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -67,11 +69,42 @@ type Runner struct {
 	// captcha_mode=admin-webview/auto, base solver оборачивается в
 	// [vkcalls.WithReplaySolver]. nil → replay выключен.
 	vkProfileStore *vkcalls.ProfileStore
+
+	// VK client-meeting mode (S2/S3): runner идлит, ctrl-ws
+	// триггерит сессию через VKDial. Каналы alloc'аются в NewRunner,
+	// nil-safe для других режимов.
+	vkDialCh        chan *vkDialReq
+	vkHangupCh      chan struct{}
+	activeSessionID atomic.Value // string; "" когда idle
+}
+
+// vkDialReq — запрос от ctrl-ws к runner'у на запуск сессии.
+type vkDialReq struct {
+	meeting   string
+	onClose   func()
+	sessionID string
+	accepted  chan error // фиксируется когда Connect привёл к session или ошибке
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
 	tagged := log.New(lg.Writer(), fmt.Sprintf("[inbound:%s] ", spec.Tag), lg.Flags())
-	return &Runner{Spec: spec, Logger: tagged, phase: "stopped"}
+	r := &Runner{Spec: spec, Logger: tagged, phase: "stopped"}
+	if spec.VKCalls != nil && spec.VKCalls.AcceptClientMeeting {
+		r.vkDialCh = make(chan *vkDialReq, 1)
+		r.vkHangupCh = make(chan struct{}, 1)
+	}
+	r.activeSessionID.Store("")
+	return r
+}
+
+func (r *Runner) isVKClientMeetingMode() bool {
+	return r.Spec.VKCalls != nil && r.Spec.VKCalls.AcceptClientMeeting
+}
+
+func newSessionID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // SetCaptchaBroker swaps in the admin captcha broker used when
@@ -109,6 +142,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.mu.Lock()
 	r.startedAt = time.Now()
 	r.mu.Unlock()
+
+	if r.isVKClientMeetingMode() {
+		return r.runClientMeetingMode(ctx)
+	}
 
 	connectSpec, err := r.buildConnectSpec()
 	if err != nil {
@@ -165,6 +202,156 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.setPhase("stopped")
 	return nil
+}
+
+// runClientMeetingMode (S2/S3) — runner идлит на dial channel и
+// триггерит сессию когда ctrl-ws присылает meeting URL.
+//
+// Один цикл runClientMeetingMode = одна VK-сессия. Когда сессия
+// заканчивается (peer disconnect / hangup / ошибка) — Run() возвращает,
+// supervisor (Manager) перезапускает Run, мы снова идлим.
+func (r *Runner) runClientMeetingMode(ctx context.Context) error {
+	r.setPhase("idle")
+	r.Logger.Printf("VK client-meeting mode: waiting for ctrl-ws DIAL")
+	select {
+	case <-ctx.Done():
+		r.setPhase("stopped")
+		return nil
+	case req := <-r.vkDialCh:
+		return r.runOneVKSession(ctx, req)
+	}
+}
+
+// runOneVKSession — драйвит ровно одну VK-сессию для уже триггеренного
+// ctrl-ws DIAL'а. accepted-канал в req сигналит ctrl-ws-handler'у когда
+// Connect либо стартовал session либо завершился ошибкой; после этого
+// мы продолжаем держать сессию пока bridge или hangup не завершит её.
+func (r *Runner) runOneVKSession(parent context.Context, req *vkDialReq) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
+	r.activeSessionID.Store(req.sessionID)
+	defer r.activeSessionID.Store("")
+
+	// Build ConnectSpec из текущего Spec'а с meeting'ом из DIAL'а.
+	cs, err := r.buildConnectSpec()
+	if err != nil {
+		req.accepted <- err
+		r.setError(err)
+		return fmt.Errorf("build connect spec: %w", err)
+	}
+	if cs.VKCalls == nil {
+		err := errors.New("client-meeting mode requires Kind=vk-calls")
+		req.accepted <- err
+		r.setError(err)
+		return err
+	}
+	cs.VKCalls.MeetingURL = req.meeting
+
+	transport, err := sfu.Get(cs.Kind)
+	if err != nil {
+		req.accepted <- err
+		r.setError(err)
+		return err
+	}
+
+	r.setPhase("connecting")
+	r.Logger.Printf("ctrl-ws DIAL accepted: session=%s connecting via vk-calls", req.sessionID)
+	sess, err := transport.Connect(ctx, cs)
+	if err != nil {
+		req.accepted <- err
+		r.setError(err)
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer sess.Close()
+	req.accepted <- nil
+	r.setError(nil)
+	r.Logger.Printf("session ready ✓")
+
+	bridge := wgrelay.NewServerBridge(r.Spec.WGEndpoint, sess, r.Logger)
+	r.bridge.Store(bridge)
+	defer r.bridge.Store(nil)
+	r.setPhase("relaying")
+	r.Logger.Printf("✓ inbound %s relaying to %s (session=%s)", r.Spec.Tag, r.Spec.WGEndpoint, req.sessionID)
+
+	bridgeErr := make(chan error, 1)
+	go func() { bridgeErr <- bridge.Run(ctx) }()
+
+	select {
+	case <-r.vkHangupCh:
+		r.Logger.Printf("ctrl-ws hangup received, ending session=%s", req.sessionID)
+	case err := <-bridgeErr:
+		if err != nil && !errors.Is(err, wgrelay.ErrTunnelClosed) && !errors.Is(err, sfu.ErrPeerRehandshake) {
+			r.setError(err)
+			r.Logger.Printf("bridge ended with error: %v", err)
+		} else {
+			r.Logger.Printf("bridge ended cleanly")
+		}
+	case <-ctx.Done():
+	}
+
+	if req.onClose != nil {
+		req.onClose()
+	}
+	r.setPhase("idle")
+	return nil
+}
+
+// VKDial вызывается ctrl-ws handler'ом (через Manager). Триггерит
+// runner на запуск сессии с указанным meeting URL'ом. Возвращает
+// sessionID если Connect успел стартовать, или ошибку.
+//
+// Bearer проверяется здесь — runner владеет своим CtrlBearer'ом.
+func (r *Runner) VKDial(meeting, bearer string, onClose func()) (string, error) {
+	if !r.isVKClientMeetingMode() {
+		return "", errors.New("inbound not in client-meeting mode")
+	}
+	expected := r.Spec.VKCalls.CtrlBearer
+	if expected != "" && expected != bearer {
+		return "", errors.New("invalid bearer token")
+	}
+	if cur, _ := r.activeSessionID.Load().(string); cur != "" {
+		return "", errors.New("inbound already has active session")
+	}
+	sid := newSessionID()
+	req := &vkDialReq{
+		meeting:   meeting,
+		onClose:   onClose,
+		sessionID: sid,
+		accepted:  make(chan error, 1),
+	}
+	select {
+	case r.vkDialCh <- req:
+	default:
+		return "", errors.New("inbound not idle (dial channel full)")
+	}
+	if err := <-req.accepted; err != nil {
+		return "", err
+	}
+	return sid, nil
+}
+
+// VKHangup корректно ломает текущую активную сессию для указанного
+// sessionID. Idempotent: hangup на чужой/несуществующий session ID —
+// no-op.
+func (r *Runner) VKHangup(sessionID string) {
+	if cur, _ := r.activeSessionID.Load().(string); cur != sessionID {
+		return
+	}
+	select {
+	case r.vkHangupCh <- struct{}{}:
+	default:
+	}
+}
+
+// Codec / IsBusy — для ctrl-ws WELCOME message.
+func (r *Runner) VKInfo() (codec string, busy bool) {
+	if r.Spec.VKCalls != nil {
+		codec = r.Spec.VKCalls.Codec
+	}
+	cur, _ := r.activeSessionID.Load().(string)
+	busy = cur != ""
+	return
 }
 
 // buildConnectSpec maps the persisted Spec onto an sfu.ConnectSpec.

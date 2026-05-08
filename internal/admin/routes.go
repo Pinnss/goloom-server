@@ -271,7 +271,7 @@ func (s *Server) handleConnStr(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	uri, err := buildConnStr(spec)
+	uri, err := buildConnStr(spec, s.opts.PublicURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -287,7 +287,7 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	uri, err := buildConnStr(spec)
+	uri, err := buildConnStr(spec, s.opts.PublicURL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -328,7 +328,11 @@ PersistentKeepalive = 25
 // it needs from one QR scan). Manually-managed inbounds — those without
 // stored client keys — fall back to a meeting-only string and the
 // operator distributes the .conf out-of-band.
-func buildConnStr(spec inbound.Spec) (string, error) {
+//
+// publicAdminURL — для VK client-meeting (S2/S3) попадает в connstr
+// как CtrlURL, чтобы клиент знал куда открывать ctrl-ws. Пусто
+// → ctrl-ws bootstrap в connstr не пишется.
+func buildConnStr(spec inbound.Spec, publicAdminURL string) (string, error) {
 	p := &connstr.Params{
 		Meeting:   spec.Meeting,
 		Tag:       spec.Tag,
@@ -339,6 +343,18 @@ func buildConnStr(spec inbound.Spec) (string, error) {
 	// link into the VK form. Prefer that.
 	if spec.VKCalls != nil && spec.VKCalls.MeetingURL != "" {
 		p.Meeting = spec.VKCalls.MeetingURL
+	}
+	// VK Codec пробрасываем — клиент должен совпадать.
+	if spec.VKCalls != nil && spec.VKCalls.Codec != "" {
+		p.Codec = spec.VKCalls.Codec
+	}
+	// VK client-meeting mode (S2/S3): meeting URL из connstr убираем,
+	// клиент его сам подставит локально. В обмен — ctrl-ws bootstrap.
+	if spec.VKCalls != nil && spec.VKCalls.AcceptClientMeeting && publicAdminURL != "" {
+		p.Meeting = ""
+		p.CtrlURL = publicAdminURL
+		p.CtrlBearer = spec.VKCalls.CtrlBearer
+		p.CtrlInboundID = spec.ID
 	}
 	if spec.ClientWGPrivateKey != "" && spec.ServerWGPublicKey != "" && spec.WGSubnet != "" {
 		p.WGClientPrivate = spec.ClientWGPrivateKey

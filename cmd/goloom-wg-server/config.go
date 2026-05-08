@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -22,6 +24,12 @@ type Config struct {
 
 type AdminConfig struct {
 	Listen string `yaml:"listen"`
+
+	// PublicURL — внешний URL admin-сервера для клиентских ctrl-ws
+	// подключений (S2/S3). Используется при генерации connstr'а.
+	// Пример: "https://45.43.89.67:9443". Если пусто — Listen
+	// fallback'ится с https-схемой.
+	PublicURL string `yaml:"public_url,omitempty"`
 
 	// CredentialsPath — JSON-файл с username/bcrypt-hash. Если пусто,
 	// используется `<dir-of-yaml>/admin.json`. На первом старте файл
@@ -73,10 +81,37 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg.path = path
 
+	// Авто-провижн bearer'а для VK инбаундов с AcceptClientMeeting=true.
+	// Если в yaml оставили пустой ctrl_bearer — генерируем 32-byte hex
+	// и сохраняем обратно в файл, чтобы между рестартами он был
+	// стабильным.
+	bearersGenerated := false
+	for i := range cfg.Inbounds {
+		vk := cfg.Inbounds[i].VKCalls
+		if vk == nil || !vk.AcceptClientMeeting {
+			continue
+		}
+		if vk.CtrlBearer == "" {
+			vk.CtrlBearer = randomBearer()
+			bearersGenerated = true
+		}
+	}
+	if bearersGenerated {
+		if err := cfg.Save(); err != nil {
+			return nil, fmt.Errorf("persist generated bearers: %w", err)
+		}
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 	return cfg, nil
+}
+
+func randomBearer() string {
+	var b [32]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 func (c *Config) validate() error {
@@ -94,7 +129,10 @@ func (c *Config) validate() error {
 		if in.ID == "" {
 			return fmt.Errorf("inbounds[%d]: id required", i)
 		}
-		if in.Meeting == "" {
+		// Meeting required, кроме VK client-meeting mode где он
+		// приходит через ctrl-ws DIAL.
+		clientMeeting := in.VKCalls != nil && in.VKCalls.AcceptClientMeeting
+		if in.Meeting == "" && !clientMeeting {
 			return fmt.Errorf("inbounds[%d] (%s): meeting required", i, in.Tag)
 		}
 		if in.WGEndpoint == "" {
