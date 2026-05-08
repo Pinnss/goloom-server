@@ -110,7 +110,10 @@ type Event struct {
 //	"telemost"          — Meeting required
 //	"livekit-wb-stream" — LiveKit* fields required (run admin webview-auth)
 //	"vk-calls"          — Meeting required (VK call link); VKCallsRole
-//	                       optional ("caller" default for clients)
+//	                       optional ("caller" default for clients).
+//	                       В client-meeting режиме (S2/S3) Meeting
+//	                       приходит из локального GUI/CLI ввода,
+//	                       а CtrlURL/Bearer/InboundID — из connstr.
 //
 // ListenAddr defaults to 127.0.0.1:51820.
 type Config struct {
@@ -120,8 +123,17 @@ type Config struct {
 	LiveKitAccessToken string `json:"livekit_access_token"`
 	LiveKitCookies     string `json:"livekit_cookies"`
 	VKCallsRole        string `json:"vk_calls_role"` // empty == "caller" for clients
+	VKCallsCodec       string `json:"vk_calls_codec"`
 	DisplayName        string `json:"display_name"`
 	ListenAddr         string `json:"listen_addr"` // default 127.0.0.1:51820
+
+	// CtrlURL / CtrlBearer / CtrlInboundID — ctrl-ws bootstrap для VK
+	// client-meeting (S2/S3). Если все три заданы, клиент перед
+	// SFU dial'ом открывает WS на CtrlURL/ctrl/inbound/<id>?token=<bearer>
+	// и отправляет DIAL с meeting URL'ом. Server лениво подключается.
+	CtrlURL       string `json:"ctrl_url,omitempty"`
+	CtrlBearer    string `json:"ctrl_bearer,omitempty"`
+	CtrlInboundID string `json:"ctrl_inbound_id,omitempty"`
 
 	// AutoWG, when true and WG is populated, makes the service bring
 	// up a wintun adapter and run a wireguard-go userspace tunnel
@@ -173,10 +185,15 @@ func FromConnStr(s string) (Config, error) {
 		transport = "telemost"
 	}
 	cfg := Config{
-		Transport:   transport,
-		Meeting:     p.Meeting,
-		DisplayName: p.DisplayName,
-		ListenAddr:  "127.0.0.1:51820",
+		Transport:    transport,
+		Meeting:      p.Meeting,
+		DisplayName:  p.DisplayName,
+		ListenAddr:   "127.0.0.1:51820",
+		VKCallsCodec: p.Codec,
+
+		CtrlURL:       p.CtrlURL,
+		CtrlBearer:    p.CtrlBearer,
+		CtrlInboundID: p.CtrlInboundID,
 	}
 	// VK Calls clients are the call originator by convention.
 	if transport == "vk-calls" {
@@ -542,6 +559,22 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	connectSpec := s.buildConnectSpec(cfg)
 	lg.Printf("connecting via transport=%s", connectSpec.Kind)
 
+	// Ctrl-WS bootstrap (S2/S3 client-meeting mode): если в connstr
+	// есть CtrlURL/Bearer/InboundID — открываем WS до admin'а и
+	// триггерим server-side VK session с meeting'ом. Server делает
+	// Transport.Connect лениво, на DIAL_OK мы знаем что receiver
+	// уже в звонке и можно идти на свой peer-join.
+	var ctrl *ctrlConn
+	if cfg.CtrlURL != "" && cfg.CtrlBearer != "" && cfg.CtrlInboundID != "" {
+		clientID := identity.NameOrGenerate(cfg.DisplayName)
+		c, err := openCtrlWS(ctx, lg, cfg.CtrlURL, cfg.CtrlInboundID, cfg.CtrlBearer, cfg.Meeting, clientID)
+		if err != nil {
+			return fmt.Errorf("ctrl-ws bootstrap: %w", err)
+		}
+		ctrl = c
+		defer ctrl.Close()
+	}
+
 	sess, err := transport.Connect(ctx, connectSpec)
 	if err != nil {
 		return err
@@ -574,6 +607,19 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	defer runCancel()
 
 	go bridge.RunRxStallWatchdog(runCtx, runCancel, lg, 30*time.Second, 2*time.Minute)
+
+	// Если ctrl-ws заведён — следим за его закрытием. Server мог
+	// решить hangup'нуть нашу сессию (ws closed) — тогда tear down.
+	if ctrl != nil {
+		go func() {
+			select {
+			case <-runCtx.Done():
+			case <-ctrl.Closed():
+				lg.Printf("ctrl-ws closed by server, tearing down session")
+				runCancel()
+			}
+		}()
+	}
 
 	s.setStatus(func(st *Status) { st.Phase = PhaseRelaying })
 
@@ -622,6 +668,7 @@ func (s *Service) buildConnectSpec(cfg Config) sfu.ConnectSpec {
 		cs.VKCalls = &sfu.VKCallsConnect{
 			MeetingURL: cfg.Meeting,
 			Role:       role,
+			Codec:      cfg.VKCallsCodec,
 			// CLI/GUI both want a browser pop-up: the user is at
 			// their workstation and can solve the captcha in 1
 			// click. AutoProxy is the right default for any code

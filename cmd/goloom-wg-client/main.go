@@ -23,6 +23,7 @@ func main() {
 	configPath := flag.String("config", "", "path to YAML config file")
 	connectStr := flag.String("connect", "", "connection string (goloom://...)")
 	listenAddr := flag.String("listen", "", "override UDP listen address (default 127.0.0.1:51820)")
+	meetingFlag := flag.String("meeting", "", "VK call meeting URL (для client-meeting connstr'ов где meeting в connstr пустой)")
 	flag.Parse()
 
 	bootLg := log.New(os.Stdout, "[goloom-wg-boot] ", log.LstdFlags|log.Lmicroseconds)
@@ -33,6 +34,9 @@ func main() {
 	}
 	if *listenAddr != "" {
 		cfg.ListenAddr = *listenAddr
+	}
+	if *meetingFlag != "" {
+		cfg.Meeting = *meetingFlag
 	}
 	bootLg.Printf("config loaded: transport=%s meeting=%s listen=%s",
 		cfg.Transport, cfg.Meeting, cfg.ListenAddr)
