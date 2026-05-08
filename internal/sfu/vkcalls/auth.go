@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Pinnss/goloom-server/internal/sfu"
 )
@@ -31,11 +33,12 @@ const (
 	// gets rate-limited.
 	vkClientID     = "6287487"
 	vkClientSecret = "QbYic1K3lEV5kTGiqlq2"
-	vkAPIVersion   = "5.276"
+	// vkAPIVersion соответствует тому что шлёт vk.com web SDK
+	// на момент vk-turn-proxy PR #162. Реальные браузеры посылают
+	// именно эту версию — отклонение на minor — bot-сигнал.
+	vkAPIVersion = "5.275"
 
 	okApplicationKey = "CGMMEJLGDIHBABABA"
-
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 // AuthSpec is the input bundle for [DoAuth].
@@ -69,6 +72,11 @@ type AuthResult struct {
 	TurnPass    string
 	StunURLs    []string
 	P2PForbidden bool
+
+	// Profile — браузерный fingerprint, использованный во всём
+	// auth-ладдере. peer.go должен предъявить тот же UA на WS-dial,
+	// иначе VK увидит «другое устройство присоединилось к сессии».
+	Profile browserProfile
 }
 
 // DoAuth runs the 4-step ladder. Returns enough state to open the
@@ -77,34 +85,58 @@ func DoAuth(ctx context.Context, lg *log.Logger, spec AuthSpec) (*AuthResult, er
 	client := &http.Client{}
 	res := &AuthResult{}
 
+	// Один профиль (UA + sec-ch-ua-*) на всю сессию — смена
+	// fingerprint между шагами сама по себе bot-сигнал.
+	profile := pickProfile()
+	res.Profile = profile
+	lg.Printf("auth identity: %s", shortUA(profile.UserAgent))
+
 	// Step 0 (seed): login.vk.ru/?act=get_anonym_token
 	// VK requires a signed anonym JWT before calls.getAnonymousToken
 	// will accept an "anonymous" request — the warmup converts the
 	// (client_id, client_secret) pair into a session-bound token.
-	seed, err := vkSeedAnonymToken(ctx, client, lg)
+	seed, err := vkSeedAnonymToken(ctx, client, lg, profile)
 	if err != nil {
 		return nil, fmt.Errorf("seed anonym token: %w", err)
 	}
 	lg.Printf("step 0 ✓ seed token: %s…", seed[:min(len(seed), 16)])
 
-	// Step 1: api.vk.com/method/calls.getAnonymousToken
-	tok, err := vkGetAnonymousToken(ctx, client, lg, spec, seed)
+	vkDelayRandom(ctx, 100, 150)
+
+	// Step 0.5 (warmup): calls.getCallPreview — реальный браузер
+	// перед getAnonymousToken запрашивает preview звонка (миниатюра,
+	// число участников). Пропуск — bot-сигнал; ошибки игнорируем,
+	// preview не критичен.
+	if err := vkGetCallPreview(ctx, client, lg, profile, spec.ShortID, seed); err != nil {
+		lg.Printf("step 0.5 warning: getCallPreview failed: %v (non-fatal)", err)
+	} else {
+		lg.Printf("step 0.5 ✓ preview warmup")
+	}
+
+	vkDelayRandom(ctx, 200, 400)
+
+	// Step 1: api.vk.ru/method/calls.getAnonymousToken
+	tok, err := vkGetAnonymousToken(ctx, client, lg, profile, spec, seed)
 	if err != nil {
 		return nil, fmt.Errorf("getAnonymousToken: %w", err)
 	}
 	res.AnonymToken = tok
 	lg.Printf("step 1 ✓ anonym token: %s…", tok[:min(len(tok), 16)])
 
+	vkDelayRandom(ctx, 100, 200)
+
 	// Step 2: calls.okcdn.ru/fb.do — auth.anonymLogin → session_key
-	sk, err := okAnonymLogin(ctx, client, lg, spec.DeviceID)
+	sk, err := okAnonymLogin(ctx, client, lg, profile, spec.DeviceID)
 	if err != nil {
 		return nil, fmt.Errorf("anonymLogin: %w", err)
 	}
 	res.SessionKey = sk
 	lg.Printf("step 2 ✓ session_key: %s…", sk[:min(len(sk), 16)])
 
+	vkDelayRandom(ctx, 100, 200)
+
 	// Step 3: calls.okcdn.ru/fb.do — vchat.joinConversationByLink
-	join, err := okJoinByLink(ctx, client, lg, spec.ShortID, tok, sk)
+	join, err := okJoinByLink(ctx, client, lg, profile, spec.ShortID, tok, sk)
 	if err != nil {
 		return nil, fmt.Errorf("joinConversationByLink: %w", err)
 	}
@@ -131,7 +163,7 @@ func DoAuth(ctx context.Context, lg *log.Logger, spec AuthSpec) (*AuthResult, er
 
 // ─── step 0: warmup, get seed anonym JWT ───────────────────────────
 
-func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger) (string, error) {
+func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile) (string, error) {
 	form := url.Values{}
 	form.Set("client_id", vkClientID)
 	form.Set("token_type", "messages")
@@ -139,10 +171,7 @@ func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger) (str
 	form.Set("version", "1")
 	form.Set("app_id", vkClientID)
 
-	body, err := postForm(ctx, c, "https://login.vk.ru/?act=get_anonym_token", form, map[string]string{
-		"Origin":  "https://id.vk.ru",
-		"Referer": "https://id.vk.ru/",
-	})
+	body, err := postForm(ctx, c, "https://login.vk.ru/?act=get_anonym_token", form, profile, nil)
 	if err != nil {
 		return "", err
 	}
@@ -164,10 +193,26 @@ func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger) (str
 	return resp.Data.AccessToken, nil
 }
 
+// ─── step 0.5: warmup — getCallPreview ─────────────────────────────
+
+// vkGetCallPreview бьёт api.vk.ru/method/calls.getCallPreview перед
+// getAnonymousToken. Реальный web-клиент VK всегда делает этот шаг
+// (миниатюра/имя организатора в pre-join экране); пропуск — bot-сигнал.
+// Ответ нам не нужен, важен только сам факт запроса.
+func vkGetCallPreview(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, shortID, seedToken string) error {
+	endpoint := "https://api.vk.ru/method/calls.getCallPreview?v=" + vkAPIVersion + "&client_id=" + vkClientID
+	form := url.Values{}
+	form.Set("vk_join_link", "https://vk.com/call/join/"+shortID)
+	form.Set("fields", "photo_200")
+	form.Set("access_token", seedToken)
+	_, err := postForm(ctx, c, endpoint, form, profile, nil)
+	return err
+}
+
 // ─── step 1: VK API ────────────────────────────────────────────────
 
-func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, spec AuthSpec, seedToken string) (string, error) {
-	endpoint := "https://api.vk.com/method/calls.getAnonymousToken?v=" + vkAPIVersion + "&client_id=" + vkClientID
+func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, spec AuthSpec, seedToken string) (string, error) {
+	endpoint := "https://api.vk.ru/method/calls.getAnonymousToken?v=" + vkAPIVersion + "&client_id=" + vkClientID
 
 	doRequest := func(extra url.Values) ([]byte, error) {
 		form := url.Values{}
@@ -177,10 +222,7 @@ func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, sp
 		for k, v := range extra {
 			form[k] = v
 		}
-		return postForm(ctx, c, endpoint, form, map[string]string{
-			"Origin":  "https://vk.com",
-			"Referer": "https://vk.com/",
-		})
+		return postForm(ctx, c, endpoint, form, profile, nil)
 	}
 
 	parse := func(body []byte) (string, *vkError, error) {
@@ -317,7 +359,7 @@ type vkError struct {
 
 // ─── step 2: OK SDK auth.anonymLogin ───────────────────────────────
 
-func okAnonymLogin(ctx context.Context, c *http.Client, lg *log.Logger, deviceID string) (string, error) {
+func okAnonymLogin(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, deviceID string) (string, error) {
 	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, deviceID)
 
 	form := url.Values{}
@@ -326,10 +368,7 @@ func okAnonymLogin(ctx context.Context, c *http.Client, lg *log.Logger, deviceID
 	form.Set("format", "JSON")
 	form.Set("application_key", okApplicationKey)
 
-	body, err := postForm(ctx, c, "https://calls.okcdn.ru/fb.do", form, map[string]string{
-		"Origin":  "https://vk.com",
-		"Referer": "https://vk.com/",
-	})
+	body, err := postForm(ctx, c, "https://calls.okcdn.ru/fb.do", form, profile, nil)
 	if err != nil {
 		return "", err
 	}
@@ -374,7 +413,7 @@ type okJoinResponse struct {
 	ErrorMsg  string `json:"error_msg,omitempty"`
 }
 
-func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, shortID, anonymToken, sessionKey string) (*okJoinResponse, error) {
+func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, shortID, anonymToken, sessionKey string) (*okJoinResponse, error) {
 	form := url.Values{}
 	form.Set("joinLink", shortID)
 	form.Set("isVideo", "false")
@@ -386,10 +425,7 @@ func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, shortID, 
 	form.Set("application_key", okApplicationKey)
 	form.Set("session_key", sessionKey)
 
-	body, err := postForm(ctx, c, "https://calls.okcdn.ru/fb.do", form, map[string]string{
-		"Origin":  "https://vk.com",
-		"Referer": "https://vk.com/",
-	})
+	body, err := postForm(ctx, c, "https://calls.okcdn.ru/fb.do", form, profile, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -408,13 +444,31 @@ func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, shortID, 
 
 // ─── shared helpers ────────────────────────────────────────────────
 
-func postForm(ctx context.Context, c *http.Client, url string, form url.Values, extraHeaders map[string]string) ([]byte, error) {
+// postForm шлёт POST с set-of-headers, имитирующим реальный VK
+// web-клиент: paired UA + sec-ch-ua-* + Sec-Fetch-* + Priority +
+// Origin/Referer на vk.ru. Лишние заголовки или их рассогласование —
+// bot-сигнал; набор и значения зеркалят vk-turn-proxy PR #162
+// client/main.go::doRequest.
+//
+// extraHeaders переопределяют дефолты — нужно крайне редко
+// (например, для /not_robot_captcha с другим Origin).
+func postForm(ctx context.Context, c *http.Client, url string, form url.Values, profile browserProfile, extraHeaders map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", profile.UserAgent)
+	req.Header.Set("sec-ch-ua", profile.SecChUa)
+	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
+	req.Header.Set("sec-ch-ua-platform", profile.SecChUaPlatform)
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Origin", "https://vk.ru")
+	req.Header.Set("Referer", "https://vk.ru/")
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
@@ -431,6 +485,51 @@ func postForm(ctx context.Context, c *http.Client, url string, form url.Values, 
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, snippet(body))
 	}
 	return body, nil
+}
+
+// vkDelayRandom вставляет джиттер между HTTP-шагами auth-ладдера.
+// Реальный браузер не лупит запросы один за другим: между
+// get_anonym_token и getAnonymousToken проходит ~100-150мс на JS,
+// между getAnonymousToken и anonymLogin — 200-400мс на UI-handoff.
+// Возвращает раньше, если ctx отменён.
+func vkDelayRandom(ctx context.Context, minMs, maxMs int) {
+	if maxMs <= minMs {
+		maxMs = minMs + 1
+	}
+	d := time.Duration(minMs+mathrand.Intn(maxMs-minMs)) * time.Millisecond
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
+
+// shortUA отрезает префикс UA для лога: «Mozilla/5.0 ... Chrome/146...»
+// → «Chrome/146 (Windows)» — достаточно чтобы понять какой профиль
+// сработал/не сработал, без замусоренных логов.
+func shortUA(ua string) string {
+	chrome := ""
+	if i := strings.Index(ua, "Chrome/"); i >= 0 {
+		end := i + 7
+		for end < len(ua) && (ua[end] == '.' || (ua[end] >= '0' && ua[end] <= '9')) {
+			end++
+		}
+		chrome = ua[i:end]
+	}
+	plat := "?"
+	switch {
+	case strings.Contains(ua, "Windows"):
+		plat = "Windows"
+	case strings.Contains(ua, "Macintosh"):
+		plat = "macOS"
+	case strings.Contains(ua, "Linux"):
+		plat = "Linux"
+	}
+	if chrome == "" {
+		return plat
+	}
+	return chrome + " (" + plat + ")"
 }
 
 func snippet(b []byte) string {
