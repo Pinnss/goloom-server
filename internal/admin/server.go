@@ -53,6 +53,14 @@ type Options struct {
 	// always loopback because the user runs the joiner locally; a
 	// future direct-WG mode would use the VPS's public IP here.
 	PublicEndpointHint string
+
+	// CaptchaBroker, when non-nil, exposes the VK Calls admin-webview
+	// captcha solver via /captcha-proxy/<id>/* and /api/captcha/*.
+	// The broker is also passed into the inbound.Manager so VK
+	// inbounds with captcha_mode=admin-webview can delegate solves to
+	// the operator's browser. nil disables the admin-webview path
+	// (auto/none modes still work via the Manager's other knobs).
+	CaptchaBroker *CaptchaBroker
 }
 
 type Server struct {
@@ -91,6 +99,14 @@ func New(opts Options) (*Server, error) {
 		sessions: newSessionStore(),
 	}
 	s.registerRoutes(mux)
+
+	// Captcha broker bolts on extra mux routes:
+	//   /captcha-proxy/<id>/...   per-challenge reverse-proxy
+	//   /api/captcha/pending      JSON list of pending challenges
+	if opts.CaptchaBroker != nil {
+		opts.CaptchaBroker.AttachToMux(mux)
+		mux.HandleFunc("GET /api/captcha/pending", s.handleCaptchaPending)
+	}
 
 	s.srv = &http.Server{
 		Addr:              opts.Listen,

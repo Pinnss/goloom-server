@@ -56,11 +56,23 @@ type Runner struct {
 	startedAt time.Time
 
 	bridge atomic.Pointer[wgrelay.SFUBridge]
+
+	// captchaBroker is the admin-webview captcha solver bridge.
+	// Populated by [Runner.SetCaptchaBroker], typically called by
+	// the surrounding [Manager] right after NewRunner. nil disables
+	// captcha_mode=admin-webview for this runner.
+	captchaBroker vkcalls.AdminCaptchaBroker
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
 	tagged := log.New(lg.Writer(), fmt.Sprintf("[inbound:%s] ", spec.Tag), lg.Flags())
 	return &Runner{Spec: spec, Logger: tagged, phase: "stopped"}
+}
+
+// SetCaptchaBroker swaps in the admin captcha broker used when
+// VKCalls.CaptchaMode=="admin-webview". nil clears it.
+func (r *Runner) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
+	r.captchaBroker = b
 }
 
 func (r *Runner) setPhase(p string) {
@@ -200,8 +212,13 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger)
 		case "none":
 			solver = nil
+		case "admin-webview":
+			if r.captchaBroker == nil {
+				return cs, fmt.Errorf("inbound %s: captcha_mode=admin-webview but no broker is wired (cmd binary forgot Manager.SetCaptchaBroker?)", r.Spec.Tag)
+			}
+			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Logger)
 		default:
-			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none)", r.Spec.Tag, captchaMode)
+			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none|admin-webview)", r.Spec.Tag, captchaMode)
 		}
 
 		cs.VKCalls = &sfu.VKCallsConnect{

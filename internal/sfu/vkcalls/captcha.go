@@ -1,32 +1,25 @@
-// Local-HTTP-proxy captcha solver. Adapted from
-// vk-turn-proxy/client/manual_captcha.go, stripped of the DNS-hijack
-// path (we use a plain localhost URL and reverse-proxy to id.vk.com
-// server-side).
+// Captcha solvers for the VK anonymous-login flow.
 //
-// How it works:
+// Three flavours, picked at runtime:
 //
-//  1. The auth chain hits a captcha challenge with a redirect_uri
-//     pointing at https://id.vk.com/not_robot_captcha?session_token=…
-//  2. We start a local HTTP server on 127.0.0.1:<port> that:
-//     - reverse-proxies every request to id.vk.com (forwarding
-//       cookies, rewriting Origin/Referer headers)
-//     - rewrites HTML responses so absolute id.vk.com URLs become
-//       localhost URLs, and injects a tiny JS shim that re-rewrites
-//       runtime-built URLs (XHR/fetch).
-//     - inspects responses for /method/captchaNotRobot.check — when
-//       one comes through with a non-empty success_token, we send
-//       it on a channel.
-//  3. We open the user's default browser at the local URL. They
-//     click "Я не робот"; the proxy sees the resulting fetch and
-//     captures the token.
-//  4. Server shuts down, solver returns the token.
+//   - [AutoProxyCaptchaSolver] — spins up a local 127.0.0.1:<port>
+//     reverse-proxy + auto-launches the operator's default browser.
+//     Default for CLI/GUI clients running on a workstation.
 //
-// Useful for CLI clients running on a workstation with a browser. For
-// headless servers, the operator captures the token via the admin
-// webview-auth flow and stuffs it into a [PreSolvedSolver]; for the
-// Wails GUI, the captcha is rendered inside an embedded webview that
-// pipes the success_token straight to the solver.
-
+//   - [PreSolvedCaptchaSolver] — replays a token captured out-of-band.
+//     One-shot.
+//
+//   - [AdminWebviewCaptchaSolver] — delegates to an [AdminCaptchaBroker]
+//     hosted by the goloom admin panel. The operator opens the broker's
+//     proxy URL in their browser, solves the captcha, and the token
+//     flows back through the same channel. Fits headless production
+//     servers where there's no desktop session for AutoProxy.
+//
+// All three converge on the same internal handler tree (reverse-proxy
+// + JS shim + token capture); the only differences are where the
+// handlers are mounted (own ephemeral HTTP server vs. an existing one)
+// and how the URL is delivered to the operator (auto-open browser vs.
+// admin-panel badge).
 package vkcalls
 
 import (
@@ -81,14 +74,119 @@ func PreSolvedCaptchaSolver(token string) sfu.VKCaptchaSolver {
 	}
 }
 
+// AdminCaptchaBroker is the admin-side surface that
+// [AdminWebviewCaptchaSolver] delegates to. The admin package
+// implements this with a registry of pending challenges + HTTP
+// routes mounted on the existing admin server.
+type AdminCaptchaBroker interface {
+	// Register adds a pending challenge to the broker's queue and
+	// returns the URL the operator should open in their browser to
+	// solve it, plus a channel that fires once with the captured
+	// success_token (empty string on timeout/cancel).
+	//
+	// Implementations must respect ctx — when ctx is cancelled, the
+	// channel must be closed so the solver doesn't hang.
+	Register(ctx context.Context, ch sfu.VKCaptchaChallenge) (proxyURL string, done <-chan string)
+}
+
+// AdminWebviewCaptchaSolver returns a [sfu.VKCaptchaSolver] that
+// delegates to the goloom admin panel via the supplied broker. Use
+// this for inbounds running on headless servers where AutoProxy
+// can't open a browser.
+//
+// The solver blocks until the operator solves the challenge or ctx
+// is cancelled — under normal conditions the admin's pending-captcha
+// badge surfaces the request within a second of the inbound asking.
+func AdminWebviewCaptchaSolver(broker AdminCaptchaBroker, lg *log.Logger) sfu.VKCaptchaSolver {
+	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
+		proxyURL, done := broker.Register(ctx, ch)
+		if lg != nil {
+			lg.Printf("captcha-broker: pending — operator should open %s", proxyURL)
+		}
+		select {
+		case tok, ok := <-done:
+			if !ok || tok == "" {
+				return sfu.VKCaptchaSolution{}, errors.New("vkcalls: admin captcha challenge expired or cancelled")
+			}
+			return sfu.VKCaptchaSolution{SuccessToken: tok}, nil
+		case <-ctx.Done():
+			return sfu.VKCaptchaSolution{}, ctx.Err()
+		}
+	}
+}
+
+// ─── proxy core (used by both AutoProxy and Admin paths) ──────────────
+
+// proxyMount captures everything the captcha proxy + JS shim need to
+// rewrite URLs. selfBase is the URL prefix the browser uses to reach
+// our proxy:
+//
+//	"http://localhost:1234"           — local-mode (AutoProxy)
+//	"/captcha-proxy/<id>"             — admin-mode (relative path)
+//
+// selfHostMatchers is the list of host strings that count as "us" for
+// header-rewrite purposes. For local mode it's the various forms of
+// the loopback host:port; for admin mode it's empty (the browser's
+// Host: header is always the admin host, not us).
+type proxyMount struct {
+	target           *neturl.URL  // upstream id.vk.com URL
+	selfBase         string       // proxy base URL the browser sees
+	selfHostMatchers []string     // proxy hosts to recognise in headers
+	onToken          func(string) // success_token captured callback
+	transport        http.RoundTripper
+}
+
+// MountAdminCaptchaProxy installs the captcha proxy + JS shim
+// handlers under urlPrefix on mux. urlPrefix must start with "/" and
+// not end with "/" (e.g. "/captcha-proxy/abc123"). target is the
+// upstream URL (id.vk.com/not_robot_captcha?session_token=…). onToken
+// fires when a success_token is captured (server-side or via the JS
+// shim's POST fallback).
+//
+// Used by [internal/admin].CaptchaBroker; sites without an admin
+// server should use [AutoProxyCaptchaSolver] instead.
+func MountAdminCaptchaProxy(mux *http.ServeMux, urlPrefix string, target *neturl.URL, onToken func(string)) error {
+	if mux == nil {
+		return errors.New("vkcalls: MountAdminCaptchaProxy: mux is nil")
+	}
+	if target == nil {
+		return errors.New("vkcalls: MountAdminCaptchaProxy: target is nil")
+	}
+	if !strings.HasPrefix(urlPrefix, "/") || strings.HasSuffix(urlPrefix, "/") {
+		return fmt.Errorf("vkcalls: MountAdminCaptchaProxy: urlPrefix %q must start with / and not end with /", urlPrefix)
+	}
+	mnt := &proxyMount{
+		target:    target,
+		selfBase:  urlPrefix,
+		onToken:   onToken,
+		transport: defaultTransport(),
+	}
+	mountHandlers(mux, urlPrefix+"/", mnt)
+	return nil
+}
+
+// AdminCaptchaProxyURL returns the relative URL where a freshly-
+// registered challenge will live, given the broker's URL prefix
+// scheme ("/captcha-proxy/<id>"). Convenience for callers that build
+// challenge IDs externally.
+func AdminCaptchaProxyURL(urlPrefix string, target *neturl.URL) string {
+	u := &neturl.URL{
+		Path:     urlPrefix + target.Path,
+		RawPath:  urlPrefix + target.EscapedPath(),
+		RawQuery: target.RawQuery,
+	}
+	if u.Path == "" {
+		u.Path = urlPrefix + "/"
+	}
+	return u.String()
+}
+
 func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.Duration, lg *log.Logger) (string, error) {
 	targetURL, err := neturl.Parse(redirectURI)
 	if err != nil {
 		return "", fmt.Errorf("invalid redirect URI: %w", err)
 	}
 
-	// Pick a random free localhost port (avoid collisions when several
-	// PoCs run in parallel).
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("listen: %w", err)
@@ -96,14 +194,6 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	tokCh := make(chan string, 1)
-	transport := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
 	notifyTok := func(s string) {
 		if s == "" {
 			return
@@ -114,24 +204,75 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 		}
 	}
 
+	mnt := &proxyMount{
+		target:           targetURL,
+		selfBase:         localCaptchaOrigin(port),
+		selfHostMatchers: localCaptchaHosts(port),
+		onToken:          notifyTok,
+		transport:        defaultTransport(),
+	}
+
+	mux := http.NewServeMux()
+	mountHandlers(mux, "/", mnt)
+
+	srv := &http.Server{Handler: mux}
+	go func() {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			lg.Printf("captcha-proxy: server: %v", err)
+		}
+	}()
+
+	localURL := localCaptchaURLForTarget(targetURL, port)
+	lg.Printf("captcha-proxy: opening %s in browser", localURL)
+	openBrowser(localURL)
+
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var token string
+	select {
+	case token = <-tokCh:
+	case <-dctx.Done():
+		_ = srv.Shutdown(context.Background())
+		return "", fmt.Errorf("captcha-proxy: timeout/cancelled: %w", dctx.Err())
+	}
+
+	shCtx, shCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer shCancel()
+	_ = srv.Shutdown(shCtx)
+	lg.Printf("captcha-proxy: success_token captured (%d chars)", len(token))
+	return token, nil
+}
+
+// mountHandlers attaches the three captcha-proxy routes to mux at
+// urlBase (which must end with "/"). Routes:
+//
+//	<urlBase>local-captcha-result   POST endpoint the JS shim hits
+//	                                 with the captured success_token
+//	<urlBase>generic_proxy          escape hatch for runtime-rewritten
+//	                                 cross-origin asset loads
+//	<urlBase>                       catch-all reverse-proxy with
+//	                                 HTML/cookie/redirect rewrites
+func mountHandlers(mux *http.ServeMux, urlBase string, mnt *proxyMount) {
+	if !strings.HasSuffix(urlBase, "/") {
+		panic("vkcalls.mountHandlers: urlBase must end with /")
+	}
+
 	proxy := &httputil.ReverseProxy{
-		Transport: transport,
+		Transport: mnt.transport,
 		Rewrite: func(req *httputil.ProxyRequest) {
-			rewriteProxyRequest(req.Out, targetURL, port)
+			rewriteProxyRequest(req.Out, mnt, urlBase)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			lg.Printf("captcha-proxy: error %s %s: %v", r.Method, r.URL.String(), err)
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprintf(w, "captcha proxy error: %v", err)
 		},
 		ModifyResponse: func(res *http.Response) error {
 			rewriteProxyCookies(res.Header)
 
-			// Redirects: rewrite same-origin redirects so they stay
-			// inside our local proxy.
 			if res.StatusCode >= 300 && res.StatusCode < 400 {
 				if loc := res.Header.Get("Location"); loc != "" {
-					if rewritten, ok := rewriteProxyRedirectLocation(loc, targetURL, port); ok {
+					if rewritten, ok := rewriteProxyRedirectLocation(loc, mnt); ok {
 						res.Header.Set("Location", rewritten)
 					} else {
 						res.Header.Del("Location")
@@ -160,11 +301,12 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 			_ = res.Body.Close()
 
 			if isToken {
-				notifyTok(extractSuccessToken(raw))
+				if mnt.onToken != nil {
+					mnt.onToken(extractSuccessToken(raw))
+				}
 			}
 
 			if isHTML {
-				// CSP/Frame headers would block our injected script.
 				for _, h := range []string{
 					"Content-Security-Policy",
 					"Content-Security-Policy-Report-Only",
@@ -178,7 +320,7 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 				} {
 					res.Header.Del(h)
 				}
-				raw = []byte(rewriteCaptchaHTML(string(raw), targetURL, port))
+				raw = []byte(rewriteCaptchaHTML(string(raw), mnt, urlBase))
 				res.Header.Del("Content-Encoding")
 			}
 
@@ -189,21 +331,15 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 		},
 	}
 
-	mux := http.NewServeMux()
-
-	// JS-side fallback: shim posts here when it sees success_token in
-	// a runtime-XHR. Server-side ModifyResponse usually catches it
-	// first, but cover the asynchronous case.
-	mux.HandleFunc("/local-captcha-result", func(w http.ResponseWriter, r *http.Request) {
-		notifyTok(r.FormValue("token"))
+	mux.HandleFunc(urlBase+"local-captcha-result", func(w http.ResponseWriter, r *http.Request) {
+		if mnt.onToken != nil {
+			mnt.onToken(r.FormValue("token"))
+		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fmt.Fprint(w, "ok")
 	})
 
-	// Generic-proxy escape hatch for nested cross-origin assets the
-	// SPA may load (e.g. gtm, errlogger). The shim rewrites those
-	// URLs through this endpoint.
-	mux.HandleFunc("/generic_proxy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(urlBase+"generic_proxy", func(w http.ResponseWriter, r *http.Request) {
 		raw := r.URL.Query().Get("proxy_url")
 		parsed, err := neturl.Parse(raw)
 		if err != nil || parsed.Host == "" {
@@ -211,45 +347,26 @@ func solveCaptchaViaProxy(ctx context.Context, redirectURI string, timeout time.
 			return
 		}
 		(&httputil.ReverseProxy{
-			Transport: transport,
+			Transport: mnt.transport,
 			Rewrite: func(req *httputil.ProxyRequest) {
 				req.Out.URL.Path = parsed.Path
 				req.Out.URL.RawQuery = parsed.RawQuery
-				rewriteProxyRequest(req.Out, parsed, port)
+				rewriteGenericProxy(req.Out, parsed)
 			},
 		}).ServeHTTP(w, r)
 	})
 
-	mux.HandleFunc("/", proxy.ServeHTTP)
+	mux.Handle(urlBase, http.StripPrefix(strings.TrimSuffix(urlBase, "/"), proxy))
+}
 
-	srv := &http.Server{Handler: mux}
-	go func() {
-		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			lg.Printf("captcha-proxy: server: %v", err)
-		}
-	}()
-
-	localURL := localCaptchaURLForTarget(targetURL, port)
-	lg.Printf("captcha-proxy: opening %s in browser", localURL)
-	openBrowser(localURL)
-
-	// Wait for token, ctx cancel, or timeout.
-	dctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	var token string
-	select {
-	case token = <-tokCh:
-	case <-dctx.Done():
-		_ = srv.Shutdown(context.Background())
-		return "", fmt.Errorf("captcha-proxy: timeout/cancelled: %w", dctx.Err())
+func defaultTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
-
-	shCtx, shCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer shCancel()
-	_ = srv.Shutdown(shCtx)
-	lg.Printf("captcha-proxy: success_token captured (%d chars)", len(token))
-	return token, nil
 }
 
 // ─── helpers (lifted ~verbatim from vk-turn-proxy/manual_captcha.go) ─
@@ -263,8 +380,8 @@ func localCaptchaHosts(port int) []string {
 	return []string{"localhost" + p, "127.0.0.1" + p, "[::1]" + p}
 }
 
-func isLocalCaptchaHost(host string, port int) bool {
-	for _, h := range localCaptchaHosts(port) {
+func isOurHost(host string, mnt *proxyMount) bool {
+	for _, h := range mnt.selfHostMatchers {
 		if strings.EqualFold(host, h) {
 			return true
 		}
@@ -272,6 +389,9 @@ func isLocalCaptchaHost(host string, port int) bool {
 	return false
 }
 
+// localCaptchaURLForTarget returns the localhost URL the browser
+// should open. Used only by the AutoProxy path — admin path builds
+// its own URL via [AdminCaptchaProxyURL].
 func localCaptchaURLForTarget(t *neturl.URL, port int) string {
 	u := &neturl.URL{
 		Scheme:   "http",
@@ -288,17 +408,17 @@ func localCaptchaURLForTarget(t *neturl.URL, port int) string {
 
 func targetOrigin(t *neturl.URL) string { return t.Scheme + "://" + t.Host }
 
-func rewriteProxyRequest(req *http.Request, t *neturl.URL, port int) {
-	req.URL.Scheme = t.Scheme
-	req.URL.Host = t.Host
+func rewriteProxyRequest(req *http.Request, mnt *proxyMount, urlBase string) {
+	req.URL.Scheme = mnt.target.Scheme
+	req.URL.Host = mnt.target.Host
 	if req.URL.Path == "" {
-		req.URL.Path = t.Path
+		req.URL.Path = mnt.target.Path
 	}
-	req.Host = t.Host
+	req.Host = mnt.target.Host
 	req.Header.Del("Accept-Encoding")
 	req.Header.Del("TE")
 	for _, n := range []string{"Origin", "Referer"} {
-		if rw := rewriteProxyHeaderURL(req.Header.Get(n), t, port); rw != "" {
+		if rw := rewriteProxyHeaderURL(req.Header.Get(n), mnt); rw != "" {
 			req.Header.Set(n, rw)
 		} else {
 			req.Header.Del(n)
@@ -306,7 +426,15 @@ func rewriteProxyRequest(req *http.Request, t *neturl.URL, port int) {
 	}
 }
 
-func rewriteProxyHeaderURL(raw string, t *neturl.URL, port int) string {
+func rewriteGenericProxy(req *http.Request, target *neturl.URL) {
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.Host = target.Host
+	req.Header.Del("Accept-Encoding")
+	req.Header.Del("TE")
+}
+
+func rewriteProxyHeaderURL(raw string, mnt *proxyMount) string {
 	if raw == "" {
 		return raw
 	}
@@ -314,11 +442,16 @@ func rewriteProxyHeaderURL(raw string, t *neturl.URL, port int) string {
 	if err != nil {
 		return raw
 	}
-	if parsed.Scheme != "http" || !isLocalCaptchaHost(parsed.Host, port) {
+	// Only rewrite headers that look like they came from our local
+	// proxy (e.g. Referer Origin). For admin mode selfHostMatchers is
+	// typically empty so we fall through and return raw unchanged —
+	// the browser is already sending headers relative to the admin
+	// host, which is fine for upstream.
+	if !isOurHost(parsed.Host, mnt) {
 		return raw
 	}
-	parsed.Scheme = t.Scheme
-	parsed.Host = t.Host
+	parsed.Scheme = mnt.target.Scheme
+	parsed.Host = mnt.target.Host
 	return parsed.String()
 }
 
@@ -332,18 +465,24 @@ func isSafeLocalRedirectPath(raw string) bool {
 	return true
 }
 
-func rewriteProxyRedirectLocation(raw string, t *neturl.URL, port int) (string, bool) {
+func rewriteProxyRedirectLocation(raw string, mnt *proxyMount) (string, bool) {
 	if isSafeLocalRedirectPath(raw) {
-		return raw, true
+		return mnt.selfBase + raw, true
 	}
 	parsed, err := neturl.Parse(raw)
 	if err != nil {
 		return "", false
 	}
-	if !strings.EqualFold(parsed.Scheme, t.Scheme) || !strings.EqualFold(parsed.Host, t.Host) {
+	if !strings.EqualFold(parsed.Scheme, mnt.target.Scheme) || !strings.EqualFold(parsed.Host, mnt.target.Host) {
 		return "", false
 	}
-	return localCaptchaURLForTarget(parsed, port), true
+	rewritten := &neturl.URL{
+		Scheme:   "",
+		Host:     "",
+		Path:     mnt.selfBase + parsed.Path,
+		RawQuery: parsed.RawQuery,
+	}
+	return rewritten.String(), true
 }
 
 func rewriteProxyCookies(header http.Header) {
@@ -380,24 +519,30 @@ func extractSuccessToken(body []byte) string {
 }
 
 // rewriteCaptchaHTML rewrites absolute id.vk.com URLs to local
-// proxy URLs and injects a runtime-rewriter script.
-func rewriteCaptchaHTML(html string, t *neturl.URL, port int) string {
-	localOrigin := localCaptchaOrigin(port)
-	upstreamOrigin := targetOrigin(t)
-	html = strings.ReplaceAll(html, upstreamOrigin, localOrigin)
+// proxy URLs and injects a runtime-rewriter script. urlBase is the
+// captcha-proxy mount path with trailing "/" (used to build the
+// /local-captcha-result and /generic_proxy paths inside the shim).
+func rewriteCaptchaHTML(html string, mnt *proxyMount, urlBase string) string {
+	upstreamOrigin := targetOrigin(mnt.target)
+	html = strings.ReplaceAll(html, upstreamOrigin, mnt.selfBase)
+
+	tokenPath := urlBase + "local-captcha-result"
+	genericPath := urlBase + "generic_proxy"
 
 	script := fmt.Sprintf(`
 <script>
 (function() {
-    var localOrigin = %q;
-    var upstreamOrigin = %q;
+    var selfBase = %q;          // "http://localhost:1234" or "/captcha-proxy/<id>"
+    var upstreamOrigin = %q;    // "https://id.vk.com"
+    var tokenPath = %q;         // POST endpoint for captured success_token
+    var genericPath = %q;       // generic-proxy escape hatch
 
     function rewriteUrl(s) {
         if (!s || typeof s !== 'string') return s;
-        if (s.indexOf(localOrigin) === 0) return s;
-        if (s.indexOf(upstreamOrigin) === 0) return localOrigin + s.slice(upstreamOrigin.length);
-        if (s.indexOf('//') === 0) return '/generic_proxy?proxy_url=' + encodeURIComponent(window.location.protocol + s);
-        if (s.indexOf('http://') === 0 || s.indexOf('https://') === 0) return '/generic_proxy?proxy_url=' + encodeURIComponent(s);
+        if (selfBase && s.indexOf(selfBase) === 0) return s;
+        if (s.indexOf(upstreamOrigin) === 0) return selfBase + s.slice(upstreamOrigin.length);
+        if (s.indexOf('//') === 0) return genericPath + '?proxy_url=' + encodeURIComponent(window.location.protocol + s);
+        if (s.indexOf('http://') === 0 || s.indexOf('https://') === 0) return genericPath + '?proxy_url=' + encodeURIComponent(s);
         return s;
     }
     function rewriteAttr(el, a) {
@@ -415,7 +560,7 @@ func rewriteCaptchaHTML(html string, t *neturl.URL, port int) string {
     }
     function postToken(t) {
         if (!t) return;
-        fetch('/local-captcha-result', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(t)})
+        fetch(tokenPath, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'token='+encodeURIComponent(t)})
           .then(function(){ document.body.innerHTML='<h2 style="text-align:center;margin-top:20vh;font-family:sans-serif">Готово! Можно закрывать вкладку.</h2>'; setTimeout(function(){window.close()},400); })
           .catch(function(){});
     }
@@ -469,7 +614,7 @@ func rewriteCaptchaHTML(html string, t *neturl.URL, port int) string {
     }
 })();
 </script>
-`, localOrigin, upstreamOrigin)
+`, mnt.selfBase, upstreamOrigin, tokenPath, genericPath)
 
 	switch {
 	case strings.Contains(html, "</head>"):
@@ -484,16 +629,13 @@ func rewriteCaptchaHTML(html string, t *neturl.URL, port int) string {
 func openBrowser(url string) {
 	switch runtime.GOOS {
 	case "windows":
-		// `cmd /c start <url>` mangles URLs containing & (cmd parses
-		// it as a command separator). Use rundll32 url.dll's
-		// FileProtocolHandler instead — direct ShellExecute, no
-		// shell-parsing in the path.
+		// `cmd /c start <url>` mangles URLs that contain `&` (the
+		// shell treats them as command separators). rundll32 takes
+		// the raw URL through the file-protocol-handler shim.
 		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 	case "darwin":
 		_ = exec.Command("open", url).Start()
-	case "linux":
-		if exec.Command("xdg-open", url).Start() != nil {
-			_ = exec.Command("gio", "open", url).Start()
-		}
+	default:
+		_ = exec.Command("xdg-open", url).Start()
 	}
 }

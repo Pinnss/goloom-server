@@ -76,6 +76,17 @@ func (s *Server) handleInboundHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, hist)
 }
 
+// handleCaptchaPending serves the JSON list of in-flight captcha
+// challenges so the admin UI's badge component can poll/render. nil
+// broker → empty slice (route only registers when a broker is wired).
+func (s *Server) handleCaptchaPending(w http.ResponseWriter, r *http.Request) {
+	if s.opts.CaptchaBroker == nil {
+		writeJSON(w, http.StatusOK, []PendingCaptcha{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.opts.CaptchaBroker.Pending())
+}
+
 // wgInterfaceInfo augments wgprovision.InterfaceInfo with a "managed"
 // flag so the panel can render unmanaged interfaces (manual setups,
 // leftovers from prior deploys) differently from panel-managed ones.

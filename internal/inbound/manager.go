@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
@@ -26,6 +27,14 @@ type Manager struct {
 
 	mu      sync.Mutex
 	entries map[string]*entry
+
+	// captchaBroker is wired by the surrounding cmd binary
+	// (cmd/goloom-wg-server) when admin-webview captcha solving is
+	// available. nil means VK Calls inbounds with
+	// captcha_mode=admin-webview will fail at Connect time. Set via
+	// [SetCaptchaBroker]; goroutine-safe because it's only mutated at
+	// startup before any Runner reads it.
+	captchaBroker vkcalls.AdminCaptchaBroker
 
 	// onChange is fired whenever the spec set changes (add/remove/toggle)
 	// so the caller can persist state.
@@ -79,6 +88,16 @@ func (m *Manager) SetOnChange(fn func()) {
 	m.mu.Unlock()
 }
 
+// SetCaptchaBroker installs the broker used by VK Calls inbounds
+// running in captcha_mode=admin-webview. Call once at startup before
+// any inbound is added. Pass nil to disable admin-webview solving
+// (auto/none modes still work).
+func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
+	m.mu.Lock()
+	m.captchaBroker = b
+	m.mu.Unlock()
+}
+
 // Add registers a new inbound and starts it (if Enabled). Returns an
 // error if the ID is already in use.
 //
@@ -94,6 +113,7 @@ func (m *Manager) Add(ctx context.Context, spec Spec) error {
 		return fmt.Errorf("inbound %s already exists", spec.ID)
 	}
 	r := NewRunner(spec, m.logger)
+	r.SetCaptchaBroker(m.captchaBroker)
 	e := &entry{runner: r}
 	m.entries[spec.ID] = e
 	rootCtx := m.rootCtx

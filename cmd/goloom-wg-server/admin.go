@@ -52,6 +52,14 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 		lg.Printf("ADMIN credentials saved at %s — change password from the dashboard ASAP", credsPath)
 	}
 
+	// Captcha broker is shared between the admin HTTP surface (where
+	// the operator's browser hits /captcha-proxy/<id>) and the
+	// inbound Manager (where VK Calls inbounds delegate captcha
+	// solving). Mounting both ends of the bridge here keeps cmd-level
+	// wiring honest about the shared state.
+	captchaBroker := admin.NewCaptchaBroker()
+	mgr.SetCaptchaBroker(captchaBroker)
+
 	srv, err := admin.New(admin.Options{
 		Listen:         cfg.Admin.Listen,
 		Credentials:    creds,
@@ -61,6 +69,7 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 		Manager:        mgr,
 		Provisioner:    prov,
 		Logger:         lg,
+		CaptchaBroker:  captchaBroker,
 	})
 	if err != nil {
 		return nil, err
