@@ -428,12 +428,26 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 
 	// Pre-resolve well-known SFU IPs to exclude from default route.
 	// LiveKit dynamic hosts are added inside run() once we have a session.
-	if sfu.Kind(cfg.Transport) == sfu.KindTelemost || cfg.Transport == "" {
+	switch sfu.Kind(cfg.Transport) {
+	case sfu.KindTelemost, "":
 		if ips, err := telemost.ResolveSFUIPs(cfg.Meeting); err == nil {
 			lg.Printf("TELEMOST IPs to exclude (initial): %v", ips)
 			_ = rm.ExcludeIPs(ips)
 		} else {
 			lg.Printf("WARN initial Telemost IP resolve: %v", err)
+		}
+	case sfu.KindVKCalls:
+		// VK auth bootstrap (DNS + HTTPS to login.vk.ru, api.vk.com,
+		// id.vk.com, calls.okcdn.ru) MUST happen before AutoWG
+		// hijacks the default route — otherwise it tries to dial
+		// through the WG tunnel that doesn't exist yet. Pre-resolve
+		// the well-known auth + signaling hosts and pin them to the
+		// real gateway.
+		if ips, err := vkcalls.ResolveSFUIPs(); err == nil {
+			lg.Printf("VK CALLS IPs to exclude (initial): %v", ips)
+			_ = rm.ExcludeIPs(ips)
+		} else {
+			lg.Printf("WARN initial VK Calls IP resolve: %v", err)
 		}
 	}
 
