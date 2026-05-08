@@ -123,6 +123,12 @@ type VKCallsSpec struct {
 	//
 	// Empty defaults to "auto".
 	CaptchaMode string `yaml:"captcha_mode,omitempty" json:"captcha_mode,omitempty"`
+
+	// Codec выбирает video transport stack — см. VKCallsConnect.Codec.
+	// Допустимые значения: "h264" / "" (default, RS I_PCM grid) или
+	// "vp8" (Telemost-стек). Эксперимент S5: VP8 даёт целевую
+	// throughput ~30+ Mbit/s vs ~600 Kbit/s на H.264.
+	Codec string `yaml:"codec,omitempty" json:"codec,omitempty"`
 }
 
 // Status is the live snapshot the admin panel renders. Not persisted.

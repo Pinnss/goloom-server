@@ -64,9 +64,10 @@ import (
 // peer is the runtime state for one VK call participation. Lives for
 // the lifetime of the [Session] that wraps it.
 type peer struct {
-	lg   *log.Logger
-	role string // "receiver" | "caller"
-	auth *AuthResult
+	lg    *log.Logger
+	role  string // "receiver" | "caller"
+	codec string // "h264" | "vp8" — video codec stack
+	auth  *AuthResult
 
 	conn   *websocket.Conn
 	sendMu sync.Mutex
@@ -76,10 +77,15 @@ type peer struct {
 	videoTrack *webrtc.TrackLocalStaticSample
 	remoteID   int64
 
-	// videocode receive pipeline — owned by Session but referenced
-	// here so OnTrack can hand the remote track to the Receiver
-	// before Session takes over.
+	// videocode receive pipeline (h264 mode only) — owned by Session
+	// but referenced here so OnTrack can hand the remote track to the
+	// Receiver before Session takes over. nil for vp8 mode.
 	videoReceiver *videocode.Receiver
+
+	// remoteTracks (vp8 mode only) — каждый remote video track из
+	// OnTrack улетает сюда. Transport.Connect читает их и оборачивает
+	// в [tunnel.Receiver]'ы. nil для h264 mode.
+	remoteTracks chan *webrtc.TrackRemote
 
 	// pending ICE candidates received before the remote SDP is set.
 	pendingMu  sync.Mutex
@@ -100,7 +106,7 @@ type peer struct {
 // dialPeer opens the OK Calls SDK WS to the call's signalling endpoint
 // and returns an initialised peer. The peer is not yet ready for I/O —
 // the caller must call buildPC and then run() to start the lifecycle.
-func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role string) (*peer, error) {
+func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role, codec string) (*peer, error) {
 	endpoint, err := augmentWSEndpoint(auth.WSEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("vkcalls: augment ws endpoint: %w", err)
@@ -131,14 +137,22 @@ func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role string
 	}
 	lg.Printf("vkcalls: ws connected (role=%s)", role)
 
-	return &peer{
+	if codec == "" {
+		codec = "h264"
+	}
+	pp := &peer{
 		lg:        lg,
 		role:      role,
+		codec:     codec,
 		auth:      auth,
 		conn:      conn,
 		connected: make(chan struct{}),
 		done:      make(chan struct{}),
-	}, nil
+	}
+	if codec == "vp8" {
+		pp.remoteTracks = make(chan *webrtc.TrackRemote, 8)
+	}
+	return pp, nil
 }
 
 // buildPC creates the pion PeerConnection with audio (Opus) + video
@@ -176,15 +190,33 @@ func (p *peer) buildPC(ctx context.Context, videoReceiver *videocode.Receiver) e
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return fmt.Errorf("vkcalls: register opus: %w", err)
 	}
-	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:    webrtc.MimeTypeH264,
-			ClockRate:   90000,
-			SDPFmtpLine: "profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1",
-		},
-		PayloadType: 126,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return fmt.Errorf("vkcalls: register h264: %w", err)
+	switch p.codec {
+	case "vp8":
+		// VK SFU offer'ит VP8/VP9/H264 (vk-poc1 README:70). PT=96
+		// — стандартный default, видеоплатформа Pion'а матчит по
+		// MimeType+SDPFmtpLine, не по PT, так что mismatch SFU
+		// answer'ом он перенумерует. Без SDPFmtpLine — VP8 не имеет
+		// fmtp параметров обязательных для negotiation.
+		if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeVP8,
+				ClockRate: 90000,
+			},
+			PayloadType: 96,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return fmt.Errorf("vkcalls: register vp8: %w", err)
+		}
+	default:
+		if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType:    webrtc.MimeTypeH264,
+				ClockRate:   90000,
+				SDPFmtpLine: "profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1",
+			},
+			PayloadType: 126,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return fmt.Errorf("vkcalls: register h264: %w", err)
+		}
 	}
 
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
@@ -205,11 +237,15 @@ func (p *peer) buildPC(ctx context.Context, videoReceiver *videocode.Receiver) e
 		return fmt.Errorf("vkcalls: add audio: %w", err)
 	}
 
+	videoMime := webrtc.MimeTypeH264
+	if p.codec == "vp8" {
+		videoMime = webrtc.MimeTypeVP8
+	}
 	video, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "vkcalls-video",
+		webrtc.RTPCodecCapability{MimeType: videoMime}, "video", "vkcalls-video",
 	)
 	if err != nil {
-		return fmt.Errorf("vkcalls: video track: %w", err)
+		return fmt.Errorf("vkcalls: video track (%s): %w", videoMime, err)
 	}
 	if _, err := pc.AddTrack(video); err != nil {
 		return fmt.Errorf("vkcalls: add video: %w", err)
@@ -289,11 +325,25 @@ func (p *peer) buildPC(ctx context.Context, videoReceiver *videocode.Receiver) e
 	pc.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) {
 		p.lg.Printf("vkcalls: remote track kind=%s codec=%s ssrc=%d",
 			tr.Kind(), tr.Codec().MimeType, tr.SSRC())
-		// Route the remote video track straight into videocode —
-		// that's where Reed-Solomon ECC + the I_PCM decoder lives.
-		// Audio is silence, we ignore it.
-		if tr.Kind() == webrtc.RTPCodecTypeVideo && p.videoReceiver != nil {
-			go p.videoReceiver.HandleTrack(ctx, tr, rcv)
+		if tr.Kind() != webrtc.RTPCodecTypeVideo {
+			return // audio = silence, ignore
+		}
+		switch p.codec {
+		case "vp8":
+			// VP8 mode: каждый remote video track пробрасываем в
+			// transport.go который оборачивает в tunnel.NewReceiver.
+			if p.remoteTracks != nil {
+				select {
+				case p.remoteTracks <- tr:
+				default:
+					p.lg.Printf("vkcalls: remoteTracks chan full, dropping track")
+				}
+			}
+		default:
+			// H264 mode: видео сразу в videocode (RS + I_PCM decoder).
+			if p.videoReceiver != nil {
+				go p.videoReceiver.HandleTrack(ctx, tr, rcv)
+			}
 		}
 	})
 

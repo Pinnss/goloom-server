@@ -243,10 +243,15 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			solver = vkcalls.WithReplaySolver(r.vkProfileStore, solver, r.Logger)
 		}
 
+		codec := ""
+		if r.Spec.VKCalls != nil {
+			codec = r.Spec.VKCalls.Codec
+		}
 		cs.VKCalls = &sfu.VKCallsConnect{
 			MeetingURL:    meetingURL,
 			Role:          role,
 			CaptchaSolver: solver,
+			Codec:         codec,
 		}
 	default:
 		return cs, fmt.Errorf("inbound %s: unknown transport %q", r.Spec.Tag, kind)

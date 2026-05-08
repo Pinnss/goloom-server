@@ -144,6 +144,16 @@ type VKCallsConnect struct {
 	// fast on a captcha challenge — only useful for replay tests
 	// where a pre-solved token has been baked into AuthOverride.
 	CaptchaSolver VKCaptchaSolver
+
+	// Codec выбирает video transport stack:
+	//   - "h264" / "" (default) — Reed-Solomon I_PCM grid в
+	//     [internal/sfu/vkcalls/videocode], throughput ~600 Kbit/s в туннеле
+	//     (значимый shaping VK или внутренние bottleneck'и).
+	//   - "vp8" — VP8-faked frames через [internal/tunnel] + wgrelay
+	//     (тот же стек что Telemost), целевая скорость ~30+ Mbit/s.
+	// Эксперимент: по PoC findings VP8 видео на VK SFU шейпится менее
+	// агрессивно, чем H.264.
+	Codec string
 }
 
 // VKCaptchaSolver is invoked when VK's anonymous-login surface

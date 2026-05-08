@@ -53,6 +53,7 @@ func main() {
 		name        = flag.String("name", "vkcalls-smoke", "participant display name")
 		timeout     = flag.Duration("captcha-timeout", 2*time.Minute, "how long to wait for the captcha solver")
 		profilePath = flag.String("profile-store", "", "path к JSON-пулу captured browser-FP. Если задан: первая попытка solve через AutoProxy + capture в пул, последующие — auto-replay. Пусто = legacy behaviour.")
+		codec       = flag.String("codec", "h264", "video codec stack: h264 (videocode RS I_PCM) или vp8 (tunnel + wgrelay, экспериментально)")
 	)
 	flag.Parse()
 
@@ -97,6 +98,7 @@ func main() {
 			MeetingURL:    *link,
 			Role:          *role,
 			CaptchaSolver: solver,
+			Codec:         *codec,
 		},
 	}
 

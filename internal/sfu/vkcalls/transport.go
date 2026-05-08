@@ -25,13 +25,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/webrtc/v4"
 
 	"github.com/Pinnss/goloom-server/internal/identity"
+	mediastubs "github.com/Pinnss/goloom-server/internal/media"
 	"github.com/Pinnss/goloom-server/internal/sfu"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls/videocode"
+	"github.com/Pinnss/goloom-server/internal/tunnel"
+	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
 // Transport implements [sfu.Transport] for VK Calls.
@@ -79,8 +84,14 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	}
 	lg.Printf("vkcalls: auth ✓ peerId=%s userId=%s", auth.PeerID, auth.UserID)
 
+	codec := vk.Codec
+	if codec == "" {
+		codec = "h264"
+	}
+	lg.Printf("vkcalls: video codec=%s", codec)
+
 	// 2. dial WS, build the peer envelope.
-	p, err := dialPeer(ctx, lg, auth, role)
+	p, err := dialPeer(ctx, lg, auth, role, codec)
 	if err != nil {
 		return nil, err
 	}
@@ -94,38 +105,102 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 		}
 	}()
 
-	// 3. allocate the videocode receive pipeline. The receiver gets
-	// wired into buildPC's OnTrack callback so RTP starts flowing the
-	// instant the SFU subscribes us to the remote track.
+	switch codec {
+	case "vp8":
+		sess, err := connectVP8(ctx, lg, auth, p, role)
+		if err != nil {
+			return nil, err
+		}
+		releaseOnError = nil
+		return sess, nil
+	default:
+		sess, err := connectH264(ctx, lg, auth, p, role)
+		if err != nil {
+			return nil, err
+		}
+		releaseOnError = nil
+		return sess, nil
+	}
+}
+
+// connectH264 — оригинальный путь на videocode (RS I_PCM grid).
+// Сохраняем как fallback пока VP8 не подтверждён в проде.
+func connectH264(ctx context.Context, lg *log.Logger, auth *AuthResult, p *peer, role string) (sfu.Session, error) {
 	receiver := videocode.NewReceiver()
 	receiver.SetTag("vkcalls-rx")
 
-	// 4. build PC + register OnTrack.
 	if err := p.buildPC(ctx, receiver); err != nil {
 		return nil, fmt.Errorf("vkcalls: buildPC: %w", err)
 	}
-
-	// 5. start the signaling loop. peer.run() owns ws teardown after
-	// this point.
 	go p.run(ctx)
-
-	// 6. block until PC is connected, then snap up the local video
-	// track for the outbound videocode Sender.
 	if err := p.waitConnected(ctx, peerConnectTimeout); err != nil {
 		return nil, fmt.Errorf("vkcalls: %w", err)
 	}
 	lg.Printf("vkcalls: peer connected (role=%s)", role)
-
 	if p.videoTrack == nil {
 		return nil, errors.New("vkcalls: peer connected but local video track is nil (buildPC bug)")
 	}
 	sender := videocode.NewSender(p.videoTrack)
 	sender.SetTag("vkcalls-tx")
+	return newSession(ctx, lg, auth, p, sender, receiver), nil
+}
 
-	// 7. wrap and ship.
-	sess := newSession(ctx, lg, auth, p, sender, receiver)
-	releaseOnError = nil // success — sess.Close now owns teardown.
-	return sess, nil
+// connectVP8 — VP8-faked frames через [internal/tunnel] + wgrelay,
+// тот же стек что Telemost. Целевая throughput выше H.264 (по PoC
+// findings) за счёт отсутствия RS-overhead и менее агрессивного
+// shaping'а на VP8 video tracks у VK SFU.
+func connectVP8(ctx context.Context, lg *log.Logger, auth *AuthResult, p *peer, role string) (sfu.Session, error) {
+	if err := p.buildPC(ctx, nil); err != nil {
+		return nil, fmt.Errorf("vkcalls: buildPC vp8: %w", err)
+	}
+	go p.run(ctx)
+	if err := p.waitConnected(ctx, peerConnectTimeout); err != nil {
+		return nil, fmt.Errorf("vkcalls: %w", err)
+	}
+	lg.Printf("vkcalls: peer connected (role=%s)", role)
+	if p.videoTrack == nil {
+		return nil, errors.New("vkcalls: peer connected but local video track is nil (buildPC bug)")
+	}
+
+	cameraSender := tunnel.NewSender(p.videoTrack)
+	cameraSender.VP8Wrap = true
+	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
+	cameraSender.Start()
+
+	merged := make(chan tunnel.ReceivedFrame, 512)
+	go pumpRemoteVP8Tracks(ctx, lg, p.remoteTracks, merged)
+
+	dt := wgrelay.New(cameraSender, merged, lg)
+	return newVP8Session(ctx, lg, auth, p, cameraSender, dt), nil
+}
+
+// pumpRemoteVP8Tracks подписывается на каждый новый remote video
+// track из buildPC OnTrack и оборачивает в tunnel.Receiver. Все
+// receiver'ы сливают frames в `merged` для wgrelay.DataTunnel.
+func pumpRemoteVP8Tracks(ctx context.Context, lg *log.Logger, tracks <-chan *webrtc.TrackRemote, merged chan<- tunnel.ReceivedFrame) {
+	idx := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case tr, ok := <-tracks:
+			if !ok {
+				return
+			}
+			idx++
+			rcv := tunnel.NewReceiver(256)
+			go rcv.Run(ctx, tr, lg)
+			go func(recv *tunnel.Receiver) {
+				for f := range recv.Frames() {
+					select {
+					case merged <- f:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}(rcv)
+		}
+	}
 }
 
 // peerConnectTimeout caps how long we'll wait between WS-up and PC=
