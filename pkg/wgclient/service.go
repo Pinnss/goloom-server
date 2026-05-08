@@ -466,6 +466,15 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 		} else {
 			lg.Printf("WARN initial VK Calls IP resolve: %v", err)
 		}
+		// Ctrl-WS host (admin :9443 на VPS) тоже должен быть мимо
+		// туннеля — иначе client-meeting bootstrap идёт сам в себя
+		// после того как AutoWG подменил default route.
+		if cfg.CtrlURL != "" {
+			if ips := resolveURLIPs(cfg.CtrlURL); len(ips) > 0 {
+				lg.Printf("CTRL-WS IPs to exclude: %v (from %s)", ips, cfg.CtrlURL)
+				_ = rm.ExcludeIPs(ips)
+			}
+		}
 	}
 
 	// Optional auto-WG: bring up wintun + wireguard-go in-process

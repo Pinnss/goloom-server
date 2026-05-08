@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -239,3 +240,25 @@ func redactWS(raw string) string {
 
 // suppress unused imports if extracted differently
 var _ = http.StatusOK
+
+// resolveURLIPs резолвит host из URL (например, https://45.43.89.67:9443)
+// в список IP. Используется для добавления admin/ctrl-ws хоста в
+// exclude-routes список ДО подъёма AutoWG.
+func resolveURLIPs(rawURL string) []net.IP {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return nil
+	}
+	return addrs
+}
