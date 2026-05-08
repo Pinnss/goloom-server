@@ -46,6 +46,7 @@ import (
 	// Side-effect imports — register transports with the sfu registry.
 	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
 	telemost "github.com/Pinnss/goloom-server/internal/sfu/telemost"
+	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 
 	"github.com/Pinnss/goloom-server/internal/tun"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
@@ -104,15 +105,21 @@ type Event struct {
 }
 
 // Config is the input to [Service.Start]. Mirrors the YAML/connstr
-// schema used by the standalone client. Only Meeting (for Telemost)
-// or the LiveKit* fields (for WB-Stream) are required depending on
-// Transport; ListenAddr defaults to 127.0.0.1:51820.
+// schema used by the standalone client. Per Transport:
+//
+//	"telemost"          — Meeting required
+//	"livekit-wb-stream" — LiveKit* fields required (run admin webview-auth)
+//	"vk-calls"          — Meeting required (VK call link); VKCallsRole
+//	                       optional ("caller" default for clients)
+//
+// ListenAddr defaults to 127.0.0.1:51820.
 type Config struct {
 	Transport          string `json:"transport"` // empty == "telemost"
 	Meeting            string `json:"meeting"`
 	LiveKitRoomURL     string `json:"livekit_room_url"`
 	LiveKitAccessToken string `json:"livekit_access_token"`
 	LiveKitCookies     string `json:"livekit_cookies"`
+	VKCallsRole        string `json:"vk_calls_role"` // empty == "caller" for clients
 	DisplayName        string `json:"display_name"`
 	ListenAddr         string `json:"listen_addr"` // default 127.0.0.1:51820
 
@@ -202,6 +209,13 @@ func (c *Config) Validate() error {
 		}
 		if c.LiveKitAccessToken == "" {
 			return errors.New("livekit_access_token required (operator runs admin webview-auth)")
+		}
+	case "vk-calls":
+		if c.Meeting == "" {
+			return errors.New("meeting (VK call link) required for transport=vk-calls")
+		}
+		if c.VKCallsRole != "" && c.VKCallsRole != "caller" && c.VKCallsRole != "receiver" {
+			return fmt.Errorf("vk_calls_role must be \"caller\" or \"receiver\" (got %q)", c.VKCallsRole)
 		}
 	default:
 		return fmt.Errorf("unknown transport %q", c.Transport)
@@ -572,6 +586,22 @@ func (s *Service) buildConnectSpec(cfg Config) sfu.ConnectSpec {
 			RoomURL:     cfg.LiveKitRoomURL,
 			AccessToken: cfg.LiveKitAccessToken,
 			Cookies:     cfg.LiveKitCookies,
+		}
+	case sfu.KindVKCalls:
+		role := cfg.VKCallsRole
+		if role == "" {
+			// Standard goloom topology — server is the receiver,
+			// the client is the caller.
+			role = "caller"
+		}
+		cs.VKCalls = &sfu.VKCallsConnect{
+			MeetingURL: cfg.Meeting,
+			Role:       role,
+			// CLI/GUI both want a browser pop-up: the user is at
+			// their workstation and can solve the captcha in 1
+			// click. AutoProxy is the right default for any code
+			// path that builds wgclient.Config.
+			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(2*time.Minute, s.logger),
 		}
 	}
 	return cs

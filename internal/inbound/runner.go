@@ -12,11 +12,14 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/sfu"
 
-	// Side-effect imports — register Telemost and LiveKit Transports
-	// with the sfu factory. Pulled in here so cmd/goloom-wg-server doesn't
-	// have to know about every transport package.
+	// Side-effect imports — register Telemost / LiveKit / VK Calls
+	// Transports with the sfu factory. Pulled in here so
+	// cmd/goloom-wg-server doesn't have to know about every transport
+	// package; the vkcalls non-blank import below also gives us access
+	// to AutoProxyCaptchaSolver for runtime injection.
 	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
 	_ "github.com/Pinnss/goloom-server/internal/sfu/telemost"
+	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
@@ -166,6 +169,45 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			RoomURL:     r.Spec.LiveKit.RoomURL,
 			AccessToken: r.Spec.LiveKit.AccessToken,
 			Cookies:     r.Spec.LiveKit.Cookies,
+		}
+	case sfu.KindVKCalls:
+		// MeetingURL prefers Spec.VKCalls.MeetingURL but falls back
+		// to the generic Spec.Meeting (same field used by Telemost).
+		// That way the admin panel can ship a single "meeting/link"
+		// input on the form and not require operators to learn two
+		// fields with identical semantics.
+		meetingURL := r.Spec.Meeting
+		role := "receiver"
+		captchaMode := "auto"
+		if r.Spec.VKCalls != nil {
+			if r.Spec.VKCalls.MeetingURL != "" {
+				meetingURL = r.Spec.VKCalls.MeetingURL
+			}
+			if r.Spec.VKCalls.Role != "" {
+				role = r.Spec.VKCalls.Role
+			}
+			if r.Spec.VKCalls.CaptchaMode != "" {
+				captchaMode = r.Spec.VKCalls.CaptchaMode
+			}
+		}
+		if meetingURL == "" {
+			return cs, fmt.Errorf("inbound %s: transport=vk-calls but no MeetingURL configured", r.Spec.Tag)
+		}
+
+		var solver sfu.VKCaptchaSolver
+		switch captchaMode {
+		case "auto":
+			solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger)
+		case "none":
+			solver = nil
+		default:
+			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none)", r.Spec.Tag, captchaMode)
+		}
+
+		cs.VKCalls = &sfu.VKCallsConnect{
+			MeetingURL:    meetingURL,
+			Role:          role,
+			CaptchaSolver: solver,
 		}
 	default:
 		return cs, fmt.Errorf("inbound %s: unknown transport %q", r.Spec.Tag, kind)

@@ -29,6 +29,10 @@ type Spec struct {
 	// Populated by the admin webview-auth flow; ignored otherwise.
 	LiveKit *LiveKitSpec `yaml:"livekit,omitempty" json:"livekit,omitempty"`
 
+	// VKCalls holds extra knobs for transport=vk-calls. Ignored
+	// otherwise.
+	VKCalls *VKCallsSpec `yaml:"vk_calls,omitempty" json:"vk_calls,omitempty"`
+
 	// WGEndpoint is the local UDP address the relay forwards decrypted
 	// tunnel frames to (typically 127.0.0.1:51820 for wg0, +1 for wg1, etc.).
 	WGEndpoint string `yaml:"wg_endpoint" json:"wg_endpoint"`
@@ -81,6 +85,44 @@ type LiveKitSpec struct {
 	// Admin UI surfaces this so operators can re-auth before runs go
 	// dark. RFC3339-formatted in JSON.
 	CookiesExpireAt time.Time `yaml:"cookies_expire_at,omitempty" json:"cookies_expire_at,omitempty"`
+}
+
+// VKCallsSpec persists the VK-Calls-specific knobs for one inbound.
+//
+// Mirror of [github.com/Pinnss/goloom-server/internal/sfu].VKCallsConnect
+// minus the CaptchaSolver — the solver is wired at runtime by the
+// runner (different deploy modes need different solvers; see the
+// "captcha_mode" field).
+//
+// MeetingURL parallels Spec.Meeting (same URL slot, just kept here
+// too for symmetry with LiveKitSpec.RoomURL). When both Spec.Meeting
+// and Spec.VKCalls.MeetingURL are set, MeetingURL wins.
+type VKCallsSpec struct {
+	// MeetingURL — full https://vk.com/call/join/<id> link or just
+	// the bare <id> short string.
+	MeetingURL string `yaml:"meeting_url,omitempty" json:"meeting_url,omitempty"`
+
+	// Role — "receiver" (default; server joins first, waits) or
+	// "caller" (server joins second, drives the offer). Should
+	// almost always be "receiver" for an inbound.
+	Role string `yaml:"role,omitempty" json:"role,omitempty"`
+
+	// CaptchaMode picks the runtime captcha solver:
+	//
+	//   - "auto"          (default) — open the operator's default
+	//                                 browser via a local reverse-
+	//                                 proxy. Needs a desktop session
+	//                                 on the server box; fine for
+	//                                 dev/laptop deploys.
+	//   - "none"          — no solver; the inbound fails fast on a
+	//                       captcha challenge. Useful when you
+	//                       expect the call link to bypass captcha
+	//                       (e.g. cached IP-bound exemptions).
+	//   - "admin-webview" — TODO; the admin panel proxies the
+	//                       captcha to a connected admin browser.
+	//
+	// Empty defaults to "auto".
+	CaptchaMode string `yaml:"captcha_mode,omitempty" json:"captcha_mode,omitempty"`
 }
 
 // Status is the live snapshot the admin panel renders. Not persisted.

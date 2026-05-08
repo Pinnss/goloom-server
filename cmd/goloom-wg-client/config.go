@@ -22,6 +22,7 @@ type yamlConfig struct {
 	LiveKitRoomURL     string `yaml:"livekit_room_url,omitempty"`
 	LiveKitAccessToken string `yaml:"livekit_access_token,omitempty"`
 	LiveKitCookies     string `yaml:"livekit_cookies,omitempty"`
+	VKCallsRole        string `yaml:"vk_calls_role,omitempty"`
 	DisplayName        string `yaml:"display_name,omitempty"`
 	ListenAddr         string `yaml:"listen_addr,omitempty"`
 	LogLevel           string `yaml:"log_level,omitempty"` // accepted for back-compat, currently unused
@@ -42,6 +43,7 @@ func loadYAMLConfig(path string) (wgclient.Config, error) {
 		LiveKitRoomURL:     y.LiveKitRoomURL,
 		LiveKitAccessToken: y.LiveKitAccessToken,
 		LiveKitCookies:     y.LiveKitCookies,
+		VKCallsRole:        y.VKCallsRole,
 		DisplayName:        y.DisplayName,
 		ListenAddr:         y.ListenAddr,
 	}
