@@ -211,11 +211,21 @@ func (c *Client) lobbyDialMobile(parent context.Context, lobbyMeeting, bearer, t
 	}
 }
 
-// buildVKCaptchaSolver возвращает captcha solver, который спавнит
-// local reverse-proxy (vkcalls.AutoProxyCaptchaSolverWithOpener) и
-// зовёт native [BrowserLauncher] открыть localhost URL в WebView.
-// Token capture делает proxy через JS shim — native никаких
-// токенов не парсит, просто рендерит UI.
+// buildVKCaptchaSolver возвращает captcha solver с client-side
+// auto-replay (если SetVKProfileStorePath задан):
+//
+//  1. Pool попыток сначала: vkcalls.WithReplaySolver берёт freshest
+//     профиль из пула, гонит captcha_v2 через VK API напрямую — без
+//     UI, ~3 сек. Успех → MarkSuccess + return token.
+//  2. Fallback на manual: если пул пуст / replay фейлнулся / VK
+//     прислал slider — поднимаем local reverse-proxy
+//     (vkcalls.AutoProxyCaptchaSolverWithOpener) + зовём native
+//     [BrowserLauncher] открыть WebView. Параллельно loggingTransport
+//     внутри proxy ловит componentDone/check тела и кормит профиль в
+//     пул — следующий коннект в этой же сессии работает без UI.
+//
+// Server-side flow тот же (S1c) — мобильный клиент получает то же
+// преимущество локально.
 func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 	c.phaseMu.Lock()
 	launcher := c.browserCB
@@ -223,11 +233,36 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 	if launcher == nil {
 		return nil
 	}
+
+	// Open ProfileStore if configured. Errors → silently fall back
+	// to no-store mode (each session = fresh manual captchas).
+	c.mu.Lock()
+	storePath := c.vkProfileStorePath
+	c.mu.Unlock()
+	var store *vkcalls.ProfileStore
+	if storePath != "" {
+		s, err := vkcalls.NewProfileStore(vkcalls.ProfileStoreOptions{Path: storePath})
+		if err != nil {
+			c.logger.Printf("vk-calls: client profile store init failed (%v); manual captcha each time", err)
+		} else {
+			store = s
+			c.logger.Printf("vk-calls: client profile store: %s (%d profiles)", storePath, len(store.Snapshot()))
+		}
+	}
+
 	opener := func(url string) {
 		c.emitPhase("captcha", "open captcha in WebView")
 		launcher.Open(url)
 	}
-	return vkcalls.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, nil, opener)
+	// AutoProxy с store-sink — каждый manual solve захватывает FP в
+	// пул через loggingTransport. Если store nil — поведение прежнее.
+	base := vkcalls.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, store, opener)
+	if store != nil {
+		// Replay-wrapper: первая фаза каждого challenge'а пробует
+		// pool'овский captcha_v2; на success возврат без UI.
+		return vkcalls.WithReplaySolver(store, base, c.logger)
+	}
+	return base
 }
 
 // ensure json import for future ConnectResult expansion

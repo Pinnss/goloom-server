@@ -112,7 +112,13 @@ type Client struct {
 	// локального UI поля. В client-meeting режиме (S2/S3) connstr.Meeting
 	// пустой; user вводит meeting сам и Kotlin'ом ставит сюда.
 	vkTargetMeeting string
-	lastErr         error
+	// vkProfileStorePath — путь к JSON-файлу VK FP пула на устройстве
+	// (typically <files_dir>/vkcalls/profiles.json). Если задан,
+	// успешные captcha-solve'ы захватывают device/browser_fp/UA в
+	// файл, и следующие auth ladder'ы идут через replay вместо
+	// показа WebView. После 2-3 ручных solve'ов captcha исчезает.
+	vkProfileStorePath string
+	lastErr            error
 
 	// sessionDone сигнализирует supervisor'у конец текущей сессии. Канал
 	// обновляется на каждую новую runSession (peer rehandshake / retry).
@@ -172,6 +178,26 @@ func (c *Client) SetBrowserLauncher(l BrowserLauncher) {
 func (c *Client) SetVKTargetMeeting(url string) {
 	c.mu.Lock()
 	c.vkTargetMeeting = url
+	c.mu.Unlock()
+}
+
+// SetVKProfileStorePath включает client-side captcha auto-replay.
+// Путь — это полный absolute path к JSON-файлу пула browser-FP'ов
+// (typically <files_dir>/vkcalls/profiles.json — Kotlin берёт
+// context.filesDir.absolutePath + '/vkcalls/profiles.json'). На
+// каждый успешный manual captcha-solve в пул захватывается
+// device + browser_fp + UA через [vkcalls.loggingTransport]; на
+// последующие auth ladder'ы pool replay'ится через captcha_v2 в
+// Go без UI.
+//
+// После 2-3 ручных solve'ов capt'а на этом устройстве исчезает —
+// тот же выигрыш что у server'ского S1c-flow на VPS.
+//
+// Вызывать ДО Connect; пустая строка отключает store (тогда
+// каждый коннект = свежие captcha).
+func (c *Client) SetVKProfileStorePath(path string) {
+	c.mu.Lock()
+	c.vkProfileStorePath = path
 	c.mu.Unlock()
 }
 
