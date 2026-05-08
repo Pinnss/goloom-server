@@ -40,3 +40,17 @@ Thumbs.db
 *.key
 *.pem
 keystore.properties
+
+# Session-meta — handoff notes, working logs, scratch summaries
+# from claude-driven sessions. The /docs tree holds the operator-
+# facing docs that ARE meant for the public repo; anything
+# matching these patterns at root or in stray subdirs is internal
+# scratchpad and stays local.
+/HANDOFF*.md
+/SESSION*.md
+/NOTES*.md
+/DISCUSSION*.md
+/SUMMARY*.md
+/SCRATCH*.md
+*.session.md
+*.handoff.md
