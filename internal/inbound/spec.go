@@ -131,16 +131,29 @@ type VKCallsSpec struct {
 	Codec string `yaml:"codec,omitempty" json:"codec,omitempty"`
 
 	// AcceptClientMeeting (S3): meeting URL приходит от клиента
-	// через ctrl-ws DIAL вместо того чтобы быть забит в yaml.
-	// Server inbound в этом режиме идле'т (ws на admin :9443) и
-	// триггерит Transport.Connect только когда клиент DIAL'нул.
+	// через in-band DIAL вместо того чтобы быть забит в yaml.
+	// Server inbound в этом режиме peer-join'ится в LOBBY (см.
+	// LobbyMeetingURL ниже) и триггерит target Transport.Connect
+	// только когда клиент шлёт goloom_ctrl DIAL.
 	// Совместимость: false (default) → старое поведение, MeetingURL
-	// в yaml обязателен. true → MeetingURL игнорируется в yaml,
-	// должен прилететь от клиента.
+	// в yaml обязателен. true → MeetingURL игнорируется, идёт через
+	// lobby flow.
 	AcceptClientMeeting bool `yaml:"accept_client_meeting,omitempty" json:"accept_client_meeting,omitempty"`
 
-	// CtrlBearer (S2) — shared secret для авторизации клиентского
-	// ctrl-ws подключения. Если пусто и AcceptClientMeeting=true,
+	// LobbyMeetingURL — стабильный VK звонок (один на все клиенты
+	// этого инбаунда), куда server-side peer-join'ится permanently
+	// и слушает goloom_ctrl DIAL. Клиент кратко peer-join'ится
+	// туда, шлёт DIAL с meeting URL'ом нужной target-сессии,
+	// получает DIAL_OK, leave'ит lobby и идёт в target meeting.
+	// ТРЕБУЕТСЯ если AcceptClientMeeting=true.
+	//
+	// Bootstrap идёт через VK SFU — DPI не отличает от обычного
+	// VK звонка, никакого прямого WSS к VPS на странном порту.
+	LobbyMeetingURL string `yaml:"lobby_meeting_url,omitempty" json:"lobby_meeting_url,omitempty"`
+
+	// CtrlBearer — shared secret для авторизации клиентского DIAL'а.
+	// Передаётся внутри goloom_ctrl payload (через transmit-data
+	// в SFU lobby), не в URL. Если пусто и AcceptClientMeeting=true,
 	// генерируется автоматически при первом старте и зашивается в
 	// yaml (для воспроизводимости между рестартами). Клиент получает
 	// его в connstr.

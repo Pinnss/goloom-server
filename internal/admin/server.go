@@ -115,15 +115,10 @@ func New(opts Options) (*Server, error) {
 		mux.HandleFunc("GET /api/captcha/pending", s.handleCaptchaPending)
 	}
 
-	// Ctrl-WS (S2/S3): /ctrl/inbound/<id>?token=<bearer> — клиентский
-	// control channel для VK инбаундов в режиме client-meeting. Auth
-	// делается per-inbound bearer'ом, не сессионной cookie, потому
-	// что клиент — отдельный процесс (goloom-wg-client / GUI / mobile),
-	// не human-driven.
-	if opts.Manager != nil {
-		ctrl := newCtrlServer(opts.Manager, opts.Logger)
-		ctrl.AttachToMux(mux)
-	}
+	// (Удалён ctrl-ws endpoint в пользу in-band lobby bootstrap'а —
+	// клиент теперь общается с сервером через VK SFU signaling в
+	// lobby звонке, никаких прямых WSS-коннектов к admin :9443.
+	// См. internal/sfu/vkcalls/lobby.go.)
 
 	s.srv = &http.Server{
 		Addr:              opts.Listen,
@@ -200,12 +195,7 @@ func isPublicPath(p string) bool {
 	}
 	// Static assets (Tailwind CSS, HTMX, Alpine, htmx-sse) must be
 	// reachable from the unauthenticated login page.
-	if strings.HasPrefix(p, "/static/") {
-		return true
-	}
-	// Ctrl-WS — auth через per-inbound bearer query param,
-	// session-cookie-flow не применяется.
-	return strings.HasPrefix(p, "/ctrl/")
+	return strings.HasPrefix(p, "/static/")
 }
 
 func isAPIPath(p string) bool {

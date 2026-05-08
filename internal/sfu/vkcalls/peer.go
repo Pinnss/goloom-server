@@ -96,6 +96,12 @@ type peer struct {
 	// в [tunnel.Receiver]'ы. nil для h264 mode.
 	remoteTracks chan *webrtc.TrackRemote
 
+	// controlListener (lobby mode only) — callback на goloom_ctrl
+	// сообщения внутри transmit-data. Когда задан, peer работает в
+	// lobby-режиме: НЕТ buildPC, НЕТ SDP/ICE обработки, role="lobby".
+	// Используется для in-band DIAL bootstrap'а.
+	controlListener func(from int64, ctrl GoloomCtrl)
+
 	// pending ICE candidates received before the remote SDP is set.
 	pendingMu  sync.Mutex
 	pendingICE []webrtc.ICECandidateInit
@@ -571,10 +577,32 @@ func (p *peer) handleTransmittedData(msg map[string]any) {
 	if data == nil {
 		return
 	}
+	from := int64(0)
+	if pid, ok := msg["participantId"].(float64); ok {
+		from = int64(pid)
+	}
 	if p.remoteID == 0 {
-		if pid, ok := msg["participantId"].(float64); ok {
-			p.remoteID = int64(pid)
+		p.remoteID = from
+	}
+
+	// In-band ctrl envelope: { "goloom_ctrl": "DIAL", ... }.
+	// Передаётся через тот же transmit-data что и SDP, отличается
+	// наличием поля goloom_ctrl. Lobby peer ничего не делает с
+	// SDP/ICE — только маршрутизирует ctrl listener'у.
+	if ctrlType, ok := data["goloom_ctrl"].(string); ok && ctrlType != "" {
+		ctrl := GoloomCtrl{
+			Type:       ctrlType,
+			MeetingURL: stringField(data, "meeting_url"),
+			Bearer:     stringField(data, "bearer"),
+			SessionID:  stringField(data, "session_id"),
+			Phase:      stringField(data, "phase"),
+			Detail:     stringField(data, "detail"),
+			Reason:     stringField(data, "reason"),
 		}
+		if p.controlListener != nil {
+			p.controlListener(from, ctrl)
+		}
+		return
 	}
 
 	if sdpWrap, ok := data["sdp"].(map[string]any); ok {
@@ -591,6 +619,13 @@ func (p *peer) handleTransmittedData(msg map[string]any) {
 	if candWrap, ok := data["candidate"].(map[string]any); ok {
 		p.handleCandidate(candWrap)
 	}
+}
+
+func stringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 func (p *peer) handleOffer(sdp string, msg map[string]any) {

@@ -54,3 +54,7 @@ keystore.properties
 /SCRATCH*.md
 *.session.md
 *.handoff.md
+
+# Local wintun.dll downloaded by dl_wintun.go — per-developer artifact.
+/wintun.dll
+/goloom-wg-client*.yaml

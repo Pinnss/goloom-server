@@ -127,13 +127,13 @@ type Config struct {
 	DisplayName        string `json:"display_name"`
 	ListenAddr         string `json:"listen_addr"` // default 127.0.0.1:51820
 
-	// CtrlURL / CtrlBearer / CtrlInboundID — ctrl-ws bootstrap для VK
-	// client-meeting (S2/S3). Если все три заданы, клиент перед
-	// SFU dial'ом открывает WS на CtrlURL/ctrl/inbound/<id>?token=<bearer>
-	// и отправляет DIAL с meeting URL'ом. Server лениво подключается.
-	CtrlURL       string `json:"ctrl_url,omitempty"`
-	CtrlBearer    string `json:"ctrl_bearer,omitempty"`
-	CtrlInboundID string `json:"ctrl_inbound_id,omitempty"`
+	// LobbyMeetingURL + Bearer — in-band lobby bootstrap для VK
+	// client-meeting (S2/S3). Клиент peer-join'ится в LobbyMeetingURL,
+	// шлёт goloom_ctrl DIAL{meeting,bearer} серверу через
+	// transmit-data, ждёт DIAL_OK, leave'ит lobby и идёт в target
+	// meeting. Bootstrap полностью через VK SFU.
+	LobbyMeetingURL string `json:"lobby_meeting_url,omitempty"`
+	Bearer          string `json:"bearer,omitempty"`
 
 	// AutoWG, when true and WG is populated, makes the service bring
 	// up a wintun adapter and run a wireguard-go userspace tunnel
@@ -191,9 +191,8 @@ func FromConnStr(s string) (Config, error) {
 		ListenAddr:   "127.0.0.1:51820",
 		VKCallsCodec: p.Codec,
 
-		CtrlURL:       p.CtrlURL,
-		CtrlBearer:    p.CtrlBearer,
-		CtrlInboundID: p.CtrlInboundID,
+		LobbyMeetingURL: p.LobbyMeetingURL,
+		Bearer:          p.Bearer,
 	}
 	// VK Calls clients are the call originator by convention.
 	if transport == "vk-calls" {
@@ -466,15 +465,9 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 		} else {
 			lg.Printf("WARN initial VK Calls IP resolve: %v", err)
 		}
-		// Ctrl-WS host (admin :9443 на VPS) тоже должен быть мимо
-		// туннеля — иначе client-meeting bootstrap идёт сам в себя
-		// после того как AutoWG подменил default route.
-		if cfg.CtrlURL != "" {
-			if ips := resolveURLIPs(cfg.CtrlURL); len(ips) > 0 {
-				lg.Printf("CTRL-WS IPs to exclude: %v (from %s)", ips, cfg.CtrlURL)
-				_ = rm.ExcludeIPs(ips)
-			}
-		}
+		// In-band lobby bootstrap идёт через тот же VK SFU edge что
+		// и target session — отдельных хостов исключать не надо,
+		// vkcalls.ResolveSFUIPs уже их перекрыл.
 	}
 
 	// Optional auto-WG: bring up wintun + wireguard-go in-process
@@ -568,20 +561,15 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	connectSpec := s.buildConnectSpec(cfg)
 	lg.Printf("connecting via transport=%s", connectSpec.Kind)
 
-	// Ctrl-WS bootstrap (S2/S3 client-meeting mode): если в connstr
-	// есть CtrlURL/Bearer/InboundID — открываем WS до admin'а и
-	// триггерим server-side VK session с meeting'ом. Server делает
-	// Transport.Connect лениво, на DIAL_OK мы знаем что receiver
-	// уже в звонке и можно идти на свой peer-join.
-	var ctrl *ctrlConn
-	if cfg.CtrlURL != "" && cfg.CtrlBearer != "" && cfg.CtrlInboundID != "" {
-		clientID := identity.NameOrGenerate(cfg.DisplayName)
-		c, err := openCtrlWS(ctx, lg, cfg.CtrlURL, cfg.CtrlInboundID, cfg.CtrlBearer, cfg.Meeting, clientID)
-		if err != nil {
-			return fmt.Errorf("ctrl-ws bootstrap: %w", err)
+	// In-band lobby bootstrap (S2/S3 client-meeting mode): если в
+	// connstr есть LobbyMeetingURL + Bearer — peer-join'имся в lobby
+	// VK звонок, находим там сервер, шлём goloom_ctrl DIAL с meeting
+	// URL'ом, ждём DIAL_OK, выходим из lobby. Сервер на DIAL уходит
+	// в target. Дальше обычный transport.Connect на target.
+	if cfg.LobbyMeetingURL != "" && cfg.Bearer != "" {
+		if err := lobbyDial(ctx, lg, cfg.LobbyMeetingURL, cfg.Bearer, cfg.Meeting, cfg.DisplayName); err != nil {
+			return fmt.Errorf("lobby bootstrap: %w", err)
 		}
-		ctrl = c
-		defer ctrl.Close()
 	}
 
 	sess, err := transport.Connect(ctx, connectSpec)
@@ -616,19 +604,6 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	defer runCancel()
 
 	go bridge.RunRxStallWatchdog(runCtx, runCancel, lg, 30*time.Second, 2*time.Minute)
-
-	// Если ctrl-ws заведён — следим за его закрытием. Server мог
-	// решить hangup'нуть нашу сессию (ws closed) — тогда tear down.
-	if ctrl != nil {
-		go func() {
-			select {
-			case <-runCtx.Done():
-			case <-ctrl.Closed():
-				lg.Printf("ctrl-ws closed by server, tearing down session")
-				runCancel()
-			}
-		}()
-	}
 
 	s.setStatus(func(st *Status) { st.Phase = PhaseRelaying })
 

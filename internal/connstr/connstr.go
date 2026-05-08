@@ -28,16 +28,19 @@ type Params struct {
 	// Клиент должен совпадать с серверным codec'ом инбаунда.
 	Codec string `json:"c,omitempty"`
 
-	// CtrlURL / CtrlBearer / CtrlInboundID (S2/S3): control-plane WS
-	// для VK client-meeting mode. Если все три заданы — клиент
-	// открывает WS на CtrlURL/ctrl/inbound/<CtrlInboundID>?token=<bearer>
-	// перед тем как стартовать SFU dial; отправляет DIAL с meeting'ом
-	// из локального конфига.
+	// LobbyMeetingURL + Bearer (S2/S3 in-band): rendezvous-канал
+	// внутри VK SFU. Клиент peer-join'ится в LobbyMeetingURL
+	// (стабильный VK звонок), находит сервер в roster'е, шлёт
+	// goloom_ctrl DIAL{meeting,bearer} через transmit-data envelope.
+	// Сервер на DIAL поднимает session'ную сторону и идёт в target
+	// meeting. Клиент тоже идёт в target и они peer-connect'ятся.
+	//
+	// Bootstrap полностью через videowebrtc.okcdn.ru — никакого
+	// прямого WSS клиента к нашему VPS.
 	//
 	// Пусто → клиент использует Meeting из этой структуры (legacy).
-	CtrlURL       string `json:"cu,omitempty"`
-	CtrlBearer    string `json:"cb,omitempty"`
-	CtrlInboundID string `json:"ci,omitempty"`
+	LobbyMeetingURL string `json:"lm,omitempty"`
+	Bearer          string `json:"b,omitempty"`
 
 	// WG-related fields. Populated by the admin panel when an inbound
 	// has been auto-provisioned, so the client can build its WG config
@@ -50,10 +53,10 @@ type Params struct {
 	WGDNS           string `json:"wgd,omitempty"`  // comma-separated DNS list, e.g. "1.1.1.1,8.8.8.8"
 }
 
-// HasCtrl сообщает, есть ли в connstr данные для ctrl-ws bootstrap'а
-// (S2/S3 client-meeting mode).
-func (p *Params) HasCtrl() bool {
-	return p.CtrlURL != "" && p.CtrlBearer != "" && p.CtrlInboundID != ""
+// HasLobby сообщает, есть ли в connstr данные для in-band lobby
+// bootstrap'а (S2/S3 client-meeting mode).
+func (p *Params) HasLobby() bool {
+	return p.LobbyMeetingURL != "" && p.Bearer != ""
 }
 
 // HasWG reports whether the connection string carries a usable embedded
@@ -106,11 +109,11 @@ func Decode(s string) (*Params, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("json decode: %w", err)
 	}
-	// Meeting URL обязателен ИЛИ должен быть ctrl-ws bootstrap. В
+	// Meeting URL обязателен ИЛИ должен быть lobby bootstrap. В
 	// client-meeting mode (S2/S3) клиент сам подставляет meeting
-	// из локальной формы, а в connstr оно опускается.
-	if p.Meeting == "" && !p.HasCtrl() {
-		return nil, fmt.Errorf("meeting URL or ctrl-ws bootstrap required")
+	// из локальной формы, а в connstr остаются только lobby fields.
+	if p.Meeting == "" && !p.HasLobby() {
+		return nil, fmt.Errorf("meeting URL or lobby bootstrap required")
 	}
 	return &p, nil
 }

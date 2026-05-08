@@ -204,22 +204,138 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// runClientMeetingMode (S2/S3) — runner идлит на dial channel и
-// триггерит сессию когда ctrl-ws присылает meeting URL.
+// runClientMeetingMode (S2/S3) — VK инбаунд в client-meeting режиме:
+//  1. peer-join'ится в LobbyMeetingURL (стабильный VK звонок),
+//  2. слушает goloom_ctrl DIAL от любого клиента в lobby,
+//  3. на DIAL валидирует bearer, шлёт DIAL_OK, закрывает lobby,
+//  4. поднимает target VK session с meeting'ом из DIAL,
+//  5. после disconnect target — обратно в lobby.
 //
-// Один цикл runClientMeetingMode = одна VK-сессия. Когда сессия
-// заканчивается (peer disconnect / hangup / ошибка) — Run() возвращает,
-// supervisor (Manager) перезапускает Run, мы снова идлим.
+// Один цикл runClientMeetingMode = одна полная фаза lobby+session.
+// Supervisor (Manager) перезапускает Run() после каждого цикла.
 func (r *Runner) runClientMeetingMode(ctx context.Context) error {
-	r.setPhase("idle")
-	r.Logger.Printf("VK client-meeting mode: waiting for ctrl-ws DIAL")
+	if r.Spec.VKCalls == nil || r.Spec.VKCalls.LobbyMeetingURL == "" {
+		err := fmt.Errorf("inbound %s: accept_client_meeting=true but no lobby_meeting_url configured", r.Spec.Tag)
+		r.setError(err)
+		return err
+	}
+
+	r.setPhase("lobby_joining")
+	r.Logger.Printf("VK lobby: joining %s, waiting for goloom_ctrl DIAL", r.Spec.VKCalls.LobbyMeetingURL)
+
+	// Captcha solver для lobby auth — тот же что и для target session.
+	solver := r.buildVKCaptchaSolver()
+
+	lobby, err := vkcalls.OpenLobbyPeer(ctx, r.Logger, vkcalls.LobbyOptions{
+		MeetingURL:    r.Spec.VKCalls.LobbyMeetingURL,
+		DisplayName:   r.Spec.DisplayName,
+		CaptchaSolver: solver,
+	})
+	if err != nil {
+		r.setError(err)
+		return fmt.Errorf("lobby join: %w", err)
+	}
+	r.setPhase("lobby_idle")
+	r.Logger.Printf("VK lobby: ✓ joined, listening")
+
+	// Read lobby goloom_ctrl until DIAL arrives or ctx done.
+	var dial vkcalls.IncomingCtrl
 	select {
 	case <-ctx.Done():
+		lobby.Close()
 		r.setPhase("stopped")
 		return nil
-	case req := <-r.vkDialCh:
-		return r.runOneVKSession(ctx, req)
+	case <-lobby.Done():
+		r.Logger.Printf("VK lobby: ws closed by remote, will retry")
+		return errors.New("lobby ws closed")
+	case dial = <-lobby.Incoming():
+		// fall through
 	}
+
+	if dial.Msg.Type != "DIAL" {
+		r.Logger.Printf("VK lobby: ignoring unexpected ctrl type=%s", dial.Msg.Type)
+		// Не выходим — caller'у можем нагрешить случайным non-DIAL,
+		// но для MVP проще закрыть lobby + перезапустить supervisor'ом.
+		lobby.Close()
+		return errors.New("unexpected ctrl in lobby")
+	}
+
+	// Validate bearer.
+	if want := r.Spec.VKCalls.CtrlBearer; want != "" && want != dial.Msg.Bearer {
+		_ = lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_FAIL", Reason: "invalid bearer"})
+		lobby.Close()
+		r.Logger.Printf("VK lobby: rejected DIAL from %d (bad bearer)", dial.From)
+		return errors.New("bearer mismatch")
+	}
+	if dial.Msg.MeetingURL == "" {
+		_ = lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_FAIL", Reason: "meeting_url required"})
+		lobby.Close()
+		return errors.New("DIAL.meeting_url empty")
+	}
+
+	sessionID := newSessionID()
+	r.Logger.Printf("VK lobby: DIAL accepted from %d → session=%s meeting=%s",
+		dial.From, sessionID, redactMeetingPrefix(dial.Msg.MeetingURL))
+	if err := lobby.SendCtrl(dial.From, vkcalls.GoloomCtrl{Type: "DIAL_OK", SessionID: sessionID}); err != nil {
+		r.Logger.Printf("VK lobby: send DIAL_OK failed: %v", err)
+		// Продолжаем всё равно — клиент может ретрайнуться.
+	}
+
+	// Lobby сделала своё дело — закрываем и идём в target.
+	lobby.Close()
+
+	// Build a synthetic vkDialReq так чтобы переиспользовать старую
+	// runOneVKSession логику. accepted-канал тут «уже использован»
+	// (DIAL_OK уже отправили в lobby) — runOneVKSession вызовет
+	// req.accepted <- nil/err но мы это просто прочитаем.
+	req := &vkDialReq{
+		meeting:   dial.Msg.MeetingURL,
+		onClose:   nil,
+		sessionID: sessionID,
+		accepted:  make(chan error, 1),
+	}
+	go func() {
+		// Read accepted чтобы не block'нуть runner'а.
+		<-req.accepted
+	}()
+	return r.runOneVKSession(ctx, req)
+}
+
+// redactMeetingPrefix логит первые 12 символов id'шника, остальное
+// маскируется. См. также admin/ctrlws.go::redactMeeting.
+func redactMeetingPrefix(url string) string {
+	if i := strings.LastIndex(url, "/"); i > 0 && i < len(url)-12 {
+		return url[:i+13] + "***"
+	}
+	return "***"
+}
+
+// buildVKCaptchaSolver — копия логики из buildConnectSpec для VK
+// (с auto-replay wrap'ом). Вынесен чтобы lobby и target делили
+// одну и ту же captcha-стратегию.
+func (r *Runner) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
+	if r.Spec.VKCalls == nil {
+		return nil
+	}
+	mode := r.Spec.VKCalls.CaptchaMode
+	if mode == "" {
+		mode = "auto"
+	}
+	var solver sfu.VKCaptchaSolver
+	switch mode {
+	case "auto":
+		solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger, nil)
+	case "none":
+		solver = nil
+	case "admin-webview":
+		if r.captchaBroker != nil {
+			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Spec.Tag, r.Logger)
+		}
+	}
+	if solver != nil && r.vkProfileStore != nil {
+		solver = vkcalls.WithReplaySolver(r.vkProfileStore, solver, r.Logger)
+	}
+	return solver
 }
 
 // runOneVKSession — драйвит ровно одну VK-сессию для уже триггеренного
