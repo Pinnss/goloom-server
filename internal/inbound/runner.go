@@ -257,14 +257,37 @@ func (r *Runner) runOneVKSession(parent context.Context, req *vkDialReq) error {
 
 	r.setPhase("connecting")
 	r.Logger.Printf("ctrl-ws DIAL accepted: session=%s connecting via vk-calls", req.sessionID)
+
+	// КРИТИЧНО: сигналим DIAL_OK ПЕРЕД transport.Connect.
+	// Server в роли receiver и Connect блокируется в waitConnected
+	// до тех пор пока caller (клиент) не пришлёт SDP offer. А клиент
+	// ждёт DIAL_OK прежде чем стартовать свой transport.Connect.
+	// Если ждать Connect здесь — deadlock на 5 минут timeout'а.
+	// Вместо этого: client получает DIAL_OK немедленно, начинает свой
+	// SFU-dial; параллельно мы тоже идём в SFU; SDP exchange случается
+	// когда оба в звонке.
+	req.accepted <- nil
+
+	// Hangup от ctrl-ws должен пробрасывать cancel в Connect — иначе
+	// при отмене ctrl-ws сессии до того как peer подключится, мы
+	// застрянем на 5 минут peerConnectTimeout.
+	hangupDone := make(chan struct{})
+	go func() {
+		select {
+		case <-r.vkHangupCh:
+			r.Logger.Printf("ctrl-ws hangup received during connect, cancelling")
+			cancel()
+		case <-hangupDone:
+		}
+	}()
+	defer close(hangupDone)
+
 	sess, err := transport.Connect(ctx, cs)
 	if err != nil {
-		req.accepted <- err
 		r.setError(err)
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer sess.Close()
-	req.accepted <- nil
 	r.setError(nil)
 	r.Logger.Printf("session ready ✓")
 
@@ -400,7 +423,11 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 				captchaMode = r.Spec.VKCalls.CaptchaMode
 			}
 		}
-		if meetingURL == "" {
+		// В client-meeting mode (S2/S3) meeting приходит от клиента
+		// через ctrl-ws DIAL после buildConnectSpec; здесь пусто
+		// допускается, runOneVKSession сам пропишет cs.VKCalls.MeetingURL.
+		clientMeeting := r.Spec.VKCalls != nil && r.Spec.VKCalls.AcceptClientMeeting
+		if meetingURL == "" && !clientMeeting {
 			return cs, fmt.Errorf("inbound %s: transport=vk-calls but no MeetingURL configured", r.Spec.Tag)
 		}
 
