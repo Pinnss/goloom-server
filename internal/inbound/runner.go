@@ -62,6 +62,11 @@ type Runner struct {
 	// the surrounding [Manager] right after NewRunner. nil disables
 	// captcha_mode=admin-webview for this runner.
 	captchaBroker vkcalls.AdminCaptchaBroker
+
+	// vkProfileStore — пул FP для auto-replay (S1c). Если задан и
+	// captcha_mode=admin-webview/auto, base solver оборачивается в
+	// [vkcalls.WithReplaySolver]. nil → replay выключен.
+	vkProfileStore *vkcalls.ProfileStore
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
@@ -73,6 +78,12 @@ func NewRunner(spec Spec, lg *log.Logger) *Runner {
 // VKCalls.CaptchaMode=="admin-webview". nil clears it.
 func (r *Runner) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
 	r.captchaBroker = b
+}
+
+// SetVKProfileStore enables auto-replay для VK captcha (см. S1c).
+// Pass nil чтобы отключить — runner вернётся к interactive-only.
+func (r *Runner) SetVKProfileStore(s *vkcalls.ProfileStore) {
+	r.vkProfileStore = s
 }
 
 func (r *Runner) setPhase(p string) {
@@ -223,6 +234,13 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Spec.Tag, r.Logger)
 		default:
 			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none|admin-webview)", r.Spec.Tag, captchaMode)
+		}
+
+		// S1c: оборачиваем base solver auto-replay логикой если пул
+		// профилей задан. На пустой пул / fail replay'я / slider
+		// challenge — фоллбэк на base (без замедления).
+		if solver != nil && r.vkProfileStore != nil {
+			solver = vkcalls.WithReplaySolver(r.vkProfileStore, solver, r.Logger)
 		}
 
 		cs.VKCalls = &sfu.VKCallsConnect{

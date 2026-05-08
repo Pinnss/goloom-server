@@ -71,6 +71,7 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 		lg.Printf("WARN: vkcalls profile store unavailable (%v); captcha-fingerprint capture disabled", err)
 	} else {
 		captchaBroker.SetFingerprintSink(vkProfileStore, lg)
+		mgr.SetVKProfileStore(vkProfileStore) // S1c: enable auto-replay
 		lg.Printf("vkcalls fingerprint pool: %s (%d profiles loaded)", vkProfilePath, len(vkProfileStore.Snapshot()))
 	}
 

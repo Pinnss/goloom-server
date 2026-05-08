@@ -36,6 +36,11 @@ type Manager struct {
 	// startup before any Runner reads it.
 	captchaBroker vkcalls.AdminCaptchaBroker
 
+	// vkProfileStore — пул browser-FP для VK auto-replay solver
+	// (S1c). nil → replay выключен, captcha решается interactive.
+	// Set via [SetVKProfileStore]; mutated only at startup.
+	vkProfileStore *vkcalls.ProfileStore
+
 	// onChange is fired whenever the spec set changes (add/remove/toggle)
 	// so the caller can persist state.
 	onChange func()
@@ -98,6 +103,16 @@ func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
 	m.mu.Unlock()
 }
 
+// SetVKProfileStore installs the browser-FP pool used by VK Calls
+// inbounds for auto-replay (S1c). Когда задан — captcha решается
+// автоматически из пула, при провале — фоллбэк на interactive solver.
+// Call once at startup. Pass nil to disable auto-replay.
+func (m *Manager) SetVKProfileStore(s *vkcalls.ProfileStore) {
+	m.mu.Lock()
+	m.vkProfileStore = s
+	m.mu.Unlock()
+}
+
 // Add registers a new inbound and starts it (if Enabled). Returns an
 // error if the ID is already in use.
 //
@@ -114,6 +129,7 @@ func (m *Manager) Add(ctx context.Context, spec Spec) error {
 	}
 	r := NewRunner(spec, m.logger)
 	r.SetCaptchaBroker(m.captchaBroker)
+	r.SetVKProfileStore(m.vkProfileStore)
 	e := &entry{runner: r}
 	m.entries[spec.ID] = e
 	rootCtx := m.rootCtx

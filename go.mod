@@ -25,9 +25,17 @@ require (
 	buf.build/go/protovalidate v1.1.2 // indirect
 	buf.build/go/protoyaml v0.6.0 // indirect
 	cel.dev/expr v0.25.1 // indirect
+	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/bdandy/go-errors v1.2.2 // indirect
+	github.com/bdandy/go-socks4 v1.2.3 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
+	github.com/bogdanfinn/fhttp v0.6.8 // indirect
+	github.com/bogdanfinn/quic-go-utls v1.0.9-utls // indirect
+	github.com/bogdanfinn/tls-client v1.14.0 // indirect
+	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
+	github.com/bogdanfinn/websocket v1.5.5-barnius // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dennwc/iters v1.2.2 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -69,7 +77,9 @@ require (
 	github.com/pion/turn/v5 v5.0.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/redis/go-redis/v9 v9.17.2 // indirect
+	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
 	github.com/wlynxg/anet v0.0.6-0.20250109065809-5501d401a269 // indirect
