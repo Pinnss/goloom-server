@@ -130,7 +130,7 @@ func (b *CaptchaBroker) dispatchProxy(w http.ResponseWriter, r *http.Request) {
 // Register implements [vkcalls.AdminCaptchaBroker]. Called by
 // [vkcalls.AdminWebviewCaptchaSolver] each time an inbound auth
 // chain hits a captcha challenge.
-func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge) (string, <-chan string) {
+func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge, tag string) (string, <-chan string) {
 	target, err := neturl.Parse(ch.RedirectURI)
 	if err != nil || target.Host == "" {
 		// Invalid URI — return a closed channel so the solver fails
@@ -152,6 +152,7 @@ func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge)
 		id:           id,
 		target:       target,
 		registeredAt: time.Now(),
+		tag:          tag,
 		done:         make(chan string, 1),
 	}
 	b.pending[id] = e
@@ -191,30 +192,6 @@ func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge)
 
 	proxyURL := vkcalls.AdminCaptchaProxyURL(urlPrefix, target)
 	return proxyURL, e.done
-}
-
-// SetTagForLatest tags the most-recently-registered challenge with an
-// inbound identifier so the admin UI can show "captcha needed for
-// inbound 'vk-test'" instead of an opaque hex id. Called by the
-// inbound runner right after Register fires.
-//
-// Best-effort: if no pending challenge exists, this is a no-op. The
-// match is by registered-at timestamp + the inbound's own
-// log/notification context — it's racy in theory but in practice the
-// solver fires synchronously on a single goroutine per inbound so
-// there's only ever one "latest" entry per asker.
-func (b *CaptchaBroker) SetTagForLatest(tag string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var newest *captchaEntry
-	for _, e := range b.pending {
-		if newest == nil || e.registeredAt.After(newest.registeredAt) {
-			newest = e
-		}
-	}
-	if newest != nil {
-		newest.tag = tag
-	}
 }
 
 // Pending returns a snapshot of the in-flight challenges for the

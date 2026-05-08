@@ -84,9 +84,13 @@ type AdminCaptchaBroker interface {
 	// solve it, plus a channel that fires once with the captured
 	// success_token (empty string on timeout/cancel).
 	//
+	// `tag` is a human-readable label (typically the inbound tag) so
+	// the admin UI can show "captcha needed for <tag>" instead of
+	// an opaque hex id.
+	//
 	// Implementations must respect ctx — when ctx is cancelled, the
 	// channel must be closed so the solver doesn't hang.
-	Register(ctx context.Context, ch sfu.VKCaptchaChallenge) (proxyURL string, done <-chan string)
+	Register(ctx context.Context, ch sfu.VKCaptchaChallenge, tag string) (proxyURL string, done <-chan string)
 }
 
 // AdminWebviewCaptchaSolver returns a [sfu.VKCaptchaSolver] that
@@ -94,14 +98,17 @@ type AdminCaptchaBroker interface {
 // this for inbounds running on headless servers where AutoProxy
 // can't open a browser.
 //
+// `tag` is a human-readable label (e.g. the inbound's tag) shown in
+// the admin UI's pending-captcha badge.
+//
 // The solver blocks until the operator solves the challenge or ctx
 // is cancelled — under normal conditions the admin's pending-captcha
 // badge surfaces the request within a second of the inbound asking.
-func AdminWebviewCaptchaSolver(broker AdminCaptchaBroker, lg *log.Logger) sfu.VKCaptchaSolver {
+func AdminWebviewCaptchaSolver(broker AdminCaptchaBroker, tag string, lg *log.Logger) sfu.VKCaptchaSolver {
 	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
-		proxyURL, done := broker.Register(ctx, ch)
+		proxyURL, done := broker.Register(ctx, ch, tag)
 		if lg != nil {
-			lg.Printf("captcha-broker: pending — operator should open %s", proxyURL)
+			lg.Printf("captcha-broker: pending [%s] — operator should open %s", tag, proxyURL)
 		}
 		select {
 		case tok, ok := <-done:

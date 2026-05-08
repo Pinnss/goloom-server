@@ -118,11 +118,15 @@ type createInboundReq struct {
 	Meeting     string `json:"meeting"`
 	DisplayName string `json:"display_name"`
 
-	// Transport lets the operator pick "telemost" or "wb_stream" from
-	// the new dropdown. Today both map onto inbound.Spec.Meeting and the
-	// existing runner; once feat/sfu-multi-transport lands the Spec
-	// itself will grow a transport discriminator and we'll persist it.
+	// Transport selects the SFU implementation. Form values:
+	//   "telemost"  → KindTelemost (default)
+	//   "wb_stream" → KindLiveKitWBStream
+	//   "vk-calls"  → KindVKCalls
 	Transport string `json:"transport"`
+
+	// VKCaptchaMode + VKRole are honoured only when Transport=vk-calls.
+	VKCaptchaMode string `json:"vk_captcha_mode"`
+	VKRole        string `json:"vk_role"`
 
 	// AutoProvision asks the server to allocate a fresh wgN interface
 	// from the provisioner pool. If false, WGEndpoint must be supplied.
@@ -148,6 +152,28 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 		DisplayName: req.DisplayName,
 		Enabled:     true,
 		CreatedAt:   time.Now().UTC(),
+	}
+
+	// Transport mapping. "" / "telemost" stay as the empty default
+	// (== KindTelemost) for backward compatibility with pre-existing
+	// inbounds; only non-default transports go on disk explicitly.
+	switch req.Transport {
+	case "", "telemost":
+		// keep spec.Transport == ""
+	case "wb_stream":
+		spec.Transport = "livekit-wb-stream"
+		// LiveKit credentials get filled by the webview-auth flow
+		// later; the bare inbound is created in a "needs auth" state.
+	case "vk-calls":
+		spec.Transport = "vk-calls"
+		spec.VKCalls = &inbound.VKCallsSpec{
+			MeetingURL:  req.Meeting,
+			Role:        coalesceStr(req.VKRole, "receiver"),
+			CaptchaMode: coalesceStr(req.VKCaptchaMode, "admin-webview"),
+		}
+	default:
+		http.Error(w, "unknown transport: "+req.Transport, http.StatusBadRequest)
+		return
 	}
 
 	if req.AutoProvision {
@@ -364,9 +390,18 @@ func decodeCreateInboundRequest(r *http.Request) (createInboundReq, error) {
 		Meeting:       strings.TrimSpace(r.PostFormValue("meeting")),
 		DisplayName:   strings.TrimSpace(r.PostFormValue("display_name")),
 		Transport:     strings.TrimSpace(r.PostFormValue("transport")),
+		VKCaptchaMode: strings.TrimSpace(r.PostFormValue("vk_captcha_mode")),
+		VKRole:        strings.TrimSpace(r.PostFormValue("vk_role")),
 		AutoProvision: parseBool(r.PostFormValue("auto_provision")),
 		WGEndpoint:    strings.TrimSpace(r.PostFormValue("wg_endpoint")),
 	}, nil
+}
+
+func coalesceStr(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
 
 func parseBool(s string) bool {

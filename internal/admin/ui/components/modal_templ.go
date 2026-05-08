@@ -129,7 +129,7 @@ func ModalsStore() templ.Component {
 			templ_7745c5c3_Var6 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<script>\n\tdocument.addEventListener('alpine:init', () => {\n\t  Alpine.store('modals', { account: false, inbound: false });\n\t});\n\t</script>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<script>\r\n\tdocument.addEventListener('alpine:init', () => {\r\n\t  Alpine.store('modals', { account: false, inbound: false });\r\n\t});\r\n\t</script>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -216,7 +216,7 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			if r.captchaBroker == nil {
 				return cs, fmt.Errorf("inbound %s: captcha_mode=admin-webview but no broker is wired (cmd binary forgot Manager.SetCaptchaBroker?)", r.Spec.Tag)
 			}
-			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Logger)
+			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Spec.Tag, r.Logger)
 		default:
 			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none|admin-webview)", r.Spec.Tag, captchaMode)
 		}

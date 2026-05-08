@@ -70,56 +70,64 @@ func Dashboard(d DashboardData) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<h1 class=\"text-lg font-semibold\">goloom <span class=\"ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-accent text-slate-900\">admin</span></h1><div class=\"flex-1\"></div><div class=\"flex items-center gap-2 text-xs text-muted\"><span class=\"font-mono text-slate-200\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<h1 class=\"text-lg font-semibold\">goloom <span class=\"ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-accent text-slate-900\">admin</span></h1><div class=\"flex-1\"></div><div class=\"flex items-center gap-2 text-xs text-muted\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = captchaBadge().Render(ctx, templ_7745c5c3_Buffer)
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<span class=\"font-mono text-slate-200\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(d.Username)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 31, Col: 56}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 32, Col: 56}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</span> <button class=\"btn-ghost\" @click=\"$store.modals.account = true\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</span> <button class=\"btn-ghost\" @click=\"$store.modals.account = true\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var4 string
 			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs("⚙ Аккаунт")
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 35, Col: 28}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 36, Col: 28}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</button> <button class=\"btn-ghost\" hx-post=\"/logout\" hx-on::after-request=\"location='/login'\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</button> <button class=\"btn-ghost\" hx-post=\"/logout\" hx-on::after-request=\"location='/login'\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 string
 			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs("Выйти")
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 40, Col: 20}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 41, Col: 20}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</button></div></header>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</button></div></header>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if d.IsDefaultPassword {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"rounded-md border border-danger/60 bg-danger/15 text-slate-100 px-4 py-3 mb-4 flex items-center gap-3\"><span class=\"text-xl\">⚠</span> <span class=\"flex-1 text-sm\">Используется временный пароль по умолчанию. <b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.</span> <button class=\"btn-primary\" @click=\"$store.modals.account = true\">Сменить пароль</button></div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<div class=\"rounded-md border border-danger/60 bg-danger/15 text-slate-100 px-4 py-3 mb-4 flex items-center gap-3\"><span class=\"text-xl\">⚠</span> <span class=\"flex-1 text-sm\">Используется временный пароль по умолчанию. <b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.</span> <button class=\"btn-primary\" @click=\"$store.modals.account = true\">Сменить пароль</button></div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<div class=\"flex flex-wrap gap-2 mb-4\"><button class=\"btn-primary\" @click=\"$store.modals.inbound = true\">+ Создать inbound</button> <button class=\"btn-ghost\" hx-get=\"/htmx/inbounds\" hx-target=\"#inbound-card-list\" hx-swap=\"outerHTML\">Обновить</button></div><div hx-ext=\"sse\" sse-connect=\"/htmx/inbounds/stream\"><div sse-swap=\"inbounds\" hx-swap=\"outerHTML\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div class=\"flex flex-wrap gap-2 mb-4\"><button class=\"btn-primary\" @click=\"$store.modals.inbound = true\">+ Создать inbound</button> <button class=\"btn-ghost\" hx-get=\"/htmx/inbounds\" hx-target=\"#inbound-card-list\" hx-swap=\"outerHTML\">Обновить</button></div><div hx-ext=\"sse\" sse-connect=\"/htmx/inbounds/stream\"><div sse-swap=\"inbounds\" hx-swap=\"outerHTML\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -127,7 +135,7 @@ func Dashboard(d DashboardData) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</div></div><details class=\"mt-6 group\"><summary class=\"cursor-pointer text-muted text-xs select-none\">WG-интерфейсы на сервере</summary><div id=\"wg-list\" class=\"mt-2\" hx-get=\"/htmx/wg-interfaces\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"></div></details><div id=\"toast\" class=\"fixed bottom-4 right-4 z-50\"></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</div></div><details class=\"mt-6 group\"><summary class=\"cursor-pointer text-muted text-xs select-none\">WG-интерфейсы на сервере</summary><div id=\"wg-list\" class=\"mt-2\" hx-get=\"/htmx/wg-interfaces\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"></div></details><div id=\"toast\" class=\"fixed bottom-4 right-4 z-50\"></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -139,7 +147,7 @@ func Dashboard(d DashboardData) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</main>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</main>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -186,7 +194,7 @@ func accountModal() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "<form class=\"flex flex-col gap-3\" hx-post=\"/api/admin/password\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.account = false; location.reload(); }\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (минимум 8 символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div><label class=\"field-label\">Подтверждение</label> <input class=\"field-input\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\"></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.account = false\">Отмена</button></div></form>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<form class=\"flex flex-col gap-3\" hx-post=\"/api/admin/password\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.account = false; location.reload(); }\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (минимум 8 символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div><label class=\"field-label\">Подтверждение</label> <input class=\"field-input\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\"></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.account = false\">Отмена</button></div></form>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -233,13 +241,62 @@ func inboundModal() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<div hx-get=\"/htmx/inbound/new\" hx-trigger=\"load\" hx-swap=\"innerHTML\"><div class=\"text-muted text-sm\">Загрузка формы…</div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "<div hx-get=\"/htmx/inbound/new\" hx-trigger=\"load\" hx-swap=\"innerHTML\"><div class=\"text-muted text-sm\">Загрузка формы…</div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			return nil
 		})
 		templ_7745c5c3_Err = components.Modal("inbound", "Новый inbound").Render(templ.WithChildren(ctx, templ_7745c5c3_Var9), templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		return nil
+	})
+}
+
+// captchaBadge polls /api/captcha/pending every 3s. When the list is
+// non-empty it shows an amber pill with the count; clicking expands
+// a dropdown listing each pending challenge with an "Открыть" link
+// that opens the proxy URL in a new tab.
+//
+// Hidden entirely when there's nothing pending — keeps the header
+// uncluttered for the common case.
+func captchaBadge() templ.Component {
+	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
+		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
+			return templ_7745c5c3_CtxErr
+		}
+		templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
+		if !templ_7745c5c3_IsBuffer {
+			defer func() {
+				templ_7745c5c3_BufErr := templruntime.ReleaseBuffer(templ_7745c5c3_Buffer)
+				if templ_7745c5c3_Err == nil {
+					templ_7745c5c3_Err = templ_7745c5c3_BufErr
+				}
+			}()
+		}
+		ctx = templ.InitializeContext(ctx)
+		templ_7745c5c3_Var10 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var10 == nil {
+			templ_7745c5c3_Var10 = templ.NopComponent
+		}
+		ctx = templ.ClearChildren(ctx)
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<div x-data=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var11 string
+		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs("{ pending: [], open: false, async refresh() { try { const r = await fetch('/api/captcha/pending'); if (r.ok) this.pending = await r.json() || []; } catch(e) {} } }")
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 140, Col: 176}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "\" x-init=\"refresh(); setInterval(()=>refresh(), 3000)\" x-show=\"pending.length > 0\" x-cloak class=\"relative\"><button type=\"button\" class=\"rounded-md px-2 py-1 bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 inline-flex items-center gap-1\" @click=\"open = !open\" :title=\"'Pending captchas: ' + pending.length\"><span>🛡</span> <span class=\"font-mono\" x-text=\"pending.length\"></span></button><div x-show=\"open\" x-cloak @click.outside=\"open = false\" class=\"absolute right-0 top-full mt-1 w-80 rounded-md border border-slate-700 bg-slate-900 shadow-lg p-2 z-30 text-left\"><div class=\"text-[11px] text-muted uppercase tracking-wide px-2 pb-1 border-b border-slate-800 mb-1\">Captchas waiting for solve</div><template x-for=\"ch in pending\" :key=\"ch.id\"><a :href=\"ch.proxy_url\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"block px-2 py-2 rounded hover:bg-slate-800 text-slate-100\"><div class=\"text-sm font-medium\" x-text=\"ch.inbound_tag || ('challenge ' + ch.id)\"></div><div class=\"text-[11px] text-muted truncate\" x-text=\"ch.proxy_url\"></div><div class=\"text-[10px] text-muted\" x-text=\"'expires ' + new Date(ch.expires_at).toLocaleTimeString()\"></div></a></template></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
