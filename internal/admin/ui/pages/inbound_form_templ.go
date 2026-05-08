@@ -10,8 +10,9 @@ import templruntime "github.com/a-h/templ/runtime"
 
 // InboundForm renders the create/edit form for one inbound. The
 // `Transport` dropdown chooses between Telemost, WB Stream, and VK
-// Calls. Each transport reveals its own set of fields via Alpine
-// x-show.
+// Calls. Per-transport hints are shown via Alpine x-show, but there
+// is exactly ONE meeting input — duplicate `name="meeting"` would
+// produce ambiguous JSON when serialised by hx-ext=json-enc.
 func InboundForm() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -40,33 +41,33 @@ func InboundForm() templ.Component {
 		var templ_7745c5c3_Var2 string
 		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs("{ transport: 'telemost', vkCaptcha: 'admin-webview' }")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 10, Col: 66}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 11, Col: 66}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" hx-post=\"/api/inbounds\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', '/htmx/inbounds', '#inbound-card-list'); }\"><div><label class=\"field-label\">Tag (короткое имя)</label> <input class=\"field-input\" name=\"tag\" placeholder=\"personal\"></div><div><label class=\"field-label\">Transport</label> <select class=\"field-input\" name=\"transport\" x-model=\"transport\"><option value=\"telemost\">Telemost</option> <option value=\"wb_stream\">WB Stream</option> <option value=\"vk-calls\">VK Calls</option></select></div><div x-show=\"transport === 'telemost'\"><label class=\"field-label\">Meeting URL</label> <input class=\"field-input\" name=\"meeting\" placeholder=\"https://telemost.yandex.ru/j/...\"></div><div x-show=\"transport === 'wb_stream'\" x-cloak><label class=\"field-label\">Room URL</label> <input class=\"field-input\" name=\"meeting\" placeholder=\"https://stream.wb.ru/r/...\"> <button type=\"button\" class=\"btn-ghost mt-2 text-xs\" disabled title=\"Будет включено после мерджа feat/sfu-multi-transport\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" hx-post=\"/api/inbounds\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', '/htmx/inbounds', '#inbound-card-list'); }\"><div><label class=\"field-label\">Tag (короткое имя)</label> <input class=\"field-input\" name=\"tag\" placeholder=\"personal\"></div><div><label class=\"field-label\">Transport</label> <select class=\"field-input\" name=\"transport\" x-model=\"transport\"><option value=\"telemost\">Telemost</option> <option value=\"wb_stream\">WB Stream</option> <option value=\"vk-calls\">VK Calls</option></select></div><div><label class=\"field-label\"><span x-show=\"transport === 'telemost'\">Meeting URL (Telemost)</span> <span x-show=\"transport === 'wb_stream'\">Room URL (WB Stream)</span> <span x-show=\"transport === 'vk-calls'\">VK Call link</span></label> <input class=\"field-input\" name=\"meeting\" :placeholder=\"transport === 'telemost' ? 'https://telemost.yandex.ru/j/...' : transport === 'wb_stream' ? 'https://stream.wb.ru/r/...' : 'https://vk.com/call/join/...'\"></div><div x-show=\"transport === 'wb_stream'\" x-cloak><button type=\"button\" class=\"btn-ghost mt-1 text-xs\" disabled title=\"Будет включено после мерджа feat/sfu-multi-transport\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var3 string
 		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs("🔐 Authenticate via WB")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 50, Col: 32}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 49, Col: 32}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</button></div><div x-show=\"transport === 'vk-calls'\" x-cloak class=\"flex flex-col gap-3\"><div><label class=\"field-label\">VK Call link</label> <input class=\"field-input\" name=\"meeting\" placeholder=\"https://vk.com/call/join/...\"></div><div><label class=\"field-label\">Captcha mode</label> <select class=\"field-input\" name=\"vk_captcha_mode\" x-model=\"vkCaptcha\"><option value=\"admin-webview\">Admin webview (этот сервер; default)</option> <option value=\"auto\">Auto — system browser (нужен desktop session)</option> <option value=\"none\">None — fail-fast on captcha</option></select><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'admin-webview'\">Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.</p><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'auto'\">Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.</p></div><input type=\"hidden\" name=\"vk_role\" value=\"receiver\"></div><div><label class=\"field-label\">Display name (пусто = случайное)</label> <input class=\"field-input\" name=\"display_name\"></div><div x-data=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</button></div><div x-show=\"transport === 'vk-calls'\" x-cloak><label class=\"field-label\">Captcha mode</label> <select class=\"field-input\" name=\"vk_captcha_mode\" x-model=\"vkCaptcha\"><option value=\"admin-webview\">Admin webview (этот сервер; default)</option> <option value=\"auto\">Auto — system browser (нужен desktop session)</option> <option value=\"none\">None — fail-fast on captcha</option></select><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'admin-webview'\">Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.</p><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'auto'\">Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.</p><input type=\"hidden\" name=\"vk_role\" value=\"receiver\"></div><div><label class=\"field-label\">Display name (пусто = случайное)</label> <input class=\"field-input\" name=\"display_name\"></div><div x-data=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var4 string
 		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs("{ auto: true }")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 86, Col: 32}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 73, Col: 32}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 		if templ_7745c5c3_Err != nil {

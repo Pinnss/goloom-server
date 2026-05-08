@@ -2,8 +2,9 @@ package pages
 
 // InboundForm renders the create/edit form for one inbound. The
 // `Transport` dropdown chooses between Telemost, WB Stream, and VK
-// Calls. Each transport reveals its own set of fields via Alpine
-// x-show.
+// Calls. Per-transport hints are shown via Alpine x-show, but there
+// is exactly ONE meeting input — duplicate `name="meeting"` would
+// produce ambiguous JSON when serialised by hx-ext=json-enc.
 templ InboundForm() {
 	<form
 		class="flex flex-col gap-3"
@@ -26,55 +27,41 @@ templ InboundForm() {
 			</select>
 		</div>
 
-		<div x-show="transport === 'telemost'">
-			<label class="field-label">Meeting URL</label>
+		<div>
+			<label class="field-label">
+				<span x-show="transport === 'telemost'">Meeting URL (Telemost)</span>
+				<span x-show="transport === 'wb_stream'">Room URL (WB Stream)</span>
+				<span x-show="transport === 'vk-calls'">VK Call link</span>
+			</label>
 			<input
 				class="field-input"
 				name="meeting"
-				placeholder="https://telemost.yandex.ru/j/..."
+				:placeholder="transport === 'telemost' ? 'https://telemost.yandex.ru/j/...' : transport === 'wb_stream' ? 'https://stream.wb.ru/r/...' : 'https://vk.com/call/join/...'"
 			/>
 		</div>
 
 		<div x-show="transport === 'wb_stream'" x-cloak>
-			<label class="field-label">Room URL</label>
-			<input
-				class="field-input"
-				name="meeting"
-				placeholder="https://stream.wb.ru/r/..."
-			/>
 			<button
 				type="button"
-				class="btn-ghost mt-2 text-xs"
+				class="btn-ghost mt-1 text-xs"
 				disabled
 				title="Будет включено после мерджа feat/sfu-multi-transport"
 			>{ "🔐 Authenticate via WB" }</button>
-			// TODO: wire up wb-auth bookmarklet flow (parallel branch
-			// feat/sfu-multi-transport).
 		</div>
 
-		<div x-show="transport === 'vk-calls'" x-cloak class="flex flex-col gap-3">
-			<div>
-				<label class="field-label">VK Call link</label>
-				<input
-					class="field-input"
-					name="meeting"
-					placeholder="https://vk.com/call/join/..."
-				/>
-			</div>
-			<div>
-				<label class="field-label">Captcha mode</label>
-				<select class="field-input" name="vk_captcha_mode" x-model="vkCaptcha">
-					<option value="admin-webview">Admin webview (этот сервер; default)</option>
-					<option value="auto">Auto — system browser (нужен desktop session)</option>
-					<option value="none">None — fail-fast on captcha</option>
-				</select>
-				<p class="text-xs opacity-60 mt-1" x-show="vkCaptcha === 'admin-webview'">
-					Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.
-				</p>
-				<p class="text-xs opacity-60 mt-1" x-show="vkCaptcha === 'auto'">
-					Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.
-				</p>
-			</div>
+		<div x-show="transport === 'vk-calls'" x-cloak>
+			<label class="field-label">Captcha mode</label>
+			<select class="field-input" name="vk_captcha_mode" x-model="vkCaptcha">
+				<option value="admin-webview">Admin webview (этот сервер; default)</option>
+				<option value="auto">Auto — system browser (нужен desktop session)</option>
+				<option value="none">None — fail-fast on captcha</option>
+			</select>
+			<p class="text-xs opacity-60 mt-1" x-show="vkCaptcha === 'admin-webview'">
+				Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.
+			</p>
+			<p class="text-xs opacity-60 mt-1" x-show="vkCaptcha === 'auto'">
+				Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.
+			</p>
 			<input type="hidden" name="vk_role" value="receiver"/>
 		</div>
 
