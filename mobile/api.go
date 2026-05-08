@@ -301,7 +301,7 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	c.emitPhase("resolving", "Telemost edge IPs")
 	telemostIPs, _ := resolveTelemostIPs(params.Meeting)
 
-	c.emitPhase("auth", "Telemost session setup")
+	c.emitPhase("telemost_setup", "session bootstrap")
 	sess, err := session.SetupSession(ctx, c.logger, params.Meeting, displayName)
 	if err != nil {
 		cancel()
