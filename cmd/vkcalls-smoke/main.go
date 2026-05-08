@@ -48,10 +48,11 @@ const (
 
 func main() {
 	var (
-		link    = flag.String("link", "", "VK call link (full URL or just the short id)")
-		role    = flag.String("role", "receiver", "receiver | caller")
-		name    = flag.String("name", "vkcalls-smoke", "participant display name")
-		timeout = flag.Duration("captcha-timeout", 2*time.Minute, "how long to wait for the captcha solver")
+		link        = flag.String("link", "", "VK call link (full URL or just the short id)")
+		role        = flag.String("role", "receiver", "receiver | caller")
+		name        = flag.String("name", "vkcalls-smoke", "participant display name")
+		timeout     = flag.Duration("captcha-timeout", 2*time.Minute, "how long to wait for the captcha solver")
+		profilePath = flag.String("profile-store", "", "path к JSON-пулу captured browser-FP. Если задан: первая попытка solve через AutoProxy + capture в пул, последующие — auto-replay. Пусто = legacy behaviour.")
 	)
 	flag.Parse()
 
@@ -71,10 +72,23 @@ func main() {
 		lg.Fatalf("sfu.Get: %v", err)
 	}
 
-	// Build the spec. AutoProxy solver is fine for a workstation
-	// smoke run — opens the user's default browser to id.vk.com,
-	// captures the success_token from the captchaNotRobot.check
-	// response.
+	// Build the captcha-solver chain.
+	// - profilePath не задан → legacy AutoProxy без replay'я
+	// - profilePath задан → ProfileStore + AutoProxy с capture'ом +
+	//   WithReplaySolver — первая попытка solve вручную, далее auto.
+	var solver sfu.VKCaptchaSolver
+	if *profilePath != "" {
+		store, err := vkcalls.NewProfileStore(vkcalls.ProfileStoreOptions{Path: *profilePath})
+		if err != nil {
+			lg.Fatalf("profile store init: %v", err)
+		}
+		lg.Printf("profile pool: %s (loaded %d profiles)", *profilePath, len(store.Snapshot()))
+		base := vkcalls.AutoProxyCaptchaSolver(*timeout, lg, store)
+		solver = vkcalls.WithReplaySolver(store, base, lg)
+	} else {
+		solver = vkcalls.AutoProxyCaptchaSolver(*timeout, lg, nil)
+	}
+
 	spec := sfu.ConnectSpec{
 		Kind:        sfu.KindVKCalls,
 		DisplayName: *name,
@@ -82,7 +96,7 @@ func main() {
 		VKCalls: &sfu.VKCallsConnect{
 			MeetingURL:    *link,
 			Role:          *role,
-			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(*timeout, lg, nil),
+			CaptchaSolver: solver,
 		},
 	}
 
