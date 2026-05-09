@@ -34,8 +34,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,9 +69,9 @@ const (
 type Status struct {
 	Phase     Phase     `json:"phase"`
 	// SubPhase — finer-grained step внутри coarse Phase. Например
-	// под Phase=Connecting может быть SubPhase="lobby_dial" или
-	// "captcha". UI рендерит как secondary caption рядом с phase chip.
-	// Совпадает по семантике с mobile/api.go::emitPhase.
+	// под Phase=Connecting может быть SubPhase="captcha". UI рендерит
+	// как secondary caption рядом с phase chip. Совпадает по семантике
+	// с mobile/api.go::emitPhase.
 	SubPhase  string    `json:"sub_phase,omitempty"`
 	Detail    string    `json:"detail,omitempty"`
 	Transport string    `json:"transport"` // "telemost" | "livekit-wb-stream"
@@ -119,9 +117,6 @@ type Event struct {
 //	"livekit-wb-stream" — LiveKit* fields required (run admin webview-auth)
 //	"vk-calls"          — Meeting required (VK call link); VKCallsRole
 //	                       optional ("caller" default for clients).
-//	                       В client-meeting режиме (S2/S3) Meeting
-//	                       приходит из локального GUI/CLI ввода,
-//	                       а CtrlURL/Bearer/InboundID — из connstr.
 //
 // ListenAddr defaults to 127.0.0.1:51820.
 type Config struct {
@@ -134,14 +129,6 @@ type Config struct {
 	VKCallsCodec       string `json:"vk_calls_codec"`
 	DisplayName        string `json:"display_name"`
 	ListenAddr         string `json:"listen_addr"` // default 127.0.0.1:51820
-
-	// LobbyMeetingURL + Bearer — in-band lobby bootstrap для VK
-	// client-meeting (S2/S3). Клиент peer-join'ится в LobbyMeetingURL,
-	// шлёт goloom_ctrl DIAL{meeting,bearer} серверу через
-	// transmit-data, ждёт DIAL_OK, leave'ит lobby и идёт в target
-	// meeting. Bootstrap полностью через VK SFU.
-	LobbyMeetingURL string `json:"lobby_meeting_url,omitempty"`
-	Bearer          string `json:"bearer,omitempty"`
 
 	// AutoWG, when true and WG is populated, makes the service bring
 	// up a wintun adapter and run a wireguard-go userspace tunnel
@@ -198,9 +185,6 @@ func FromConnStr(s string) (Config, error) {
 		DisplayName:  p.DisplayName,
 		ListenAddr:   "127.0.0.1:51820",
 		VKCallsCodec: p.Codec,
-
-		LobbyMeetingURL: p.LobbyMeetingURL,
-		Bearer:          p.Bearer,
 	}
 	// VK Calls clients are the call originator by convention.
 	if transport == "vk-calls" {
@@ -592,29 +576,6 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 		}
 	}
 
-	// In-band lobby bootstrap (S2/S3 client-meeting mode): если в
-	// connstr есть LobbyMeetingURL + Bearer — peer-join'имся в lobby
-	// VK звонок, находим там сервер, шлём goloom_ctrl DIAL с meeting
-	// URL'ом, ждём DIAL_OK, выходим из lobby. Сервер на DIAL уходит
-	// в target. Дальше обычный transport.Connect на target.
-	//
-	// DIAL_OK содержит server_target_user_id — userID который сервер
-	// получит в target meeting'е. Прокидываем его как override через
-	// VKCALLS_TARGET_REMOTE_ID env var (читается peer.go::dialPeer),
-	// чтобы клиентский target peer сразу взял правильного remote'а
-	// вместо стейл'а из реверс-итерации roster'а.
-	if cfg.LobbyMeetingURL != "" && cfg.Bearer != "" {
-		s.setStatus(func(st *Status) { st.SubPhase = "lobby_join"; st.Detail = "" })
-		serverTargetUID, err := lobbyDial(ctx, lg, cfg.LobbyMeetingURL, cfg.Bearer, cfg.Meeting, cfg.DisplayName)
-		if err != nil {
-			return fmt.Errorf("lobby bootstrap: %w", err)
-		}
-		if serverTargetUID != 0 {
-			os.Setenv("VKCALLS_TARGET_REMOTE_ID", strconv.FormatInt(serverTargetUID, 10))
-			defer os.Unsetenv("VKCALLS_TARGET_REMOTE_ID")
-		}
-		s.setStatus(func(st *Status) { st.SubPhase = "target_connect"; st.Detail = "" })
-	}
 
 	sess, err := transport.Connect(ctx, connectSpec)
 	if err != nil {

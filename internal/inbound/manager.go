@@ -125,44 +125,6 @@ func (m *Manager) SetVKProfileStore(s *vkcalls.ProfileStore) {
 	m.mu.Unlock()
 }
 
-// ─── CtrlBackend (S2/S3) ────────────────────────────────────────────
-// Реализация admin.CtrlBackend для ctrl-ws клиент-meeting flow.
-// Roughly: ctrl-ws handler → Manager.VKDial → Runner.VKDial.
-
-// VKDial implements admin.CtrlBackend.
-func (m *Manager) VKDial(inboundID, bearer, meeting string, onClose func()) (string, error) {
-	m.mu.Lock()
-	e, ok := m.entries[inboundID]
-	m.mu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("inbound %q not found", inboundID)
-	}
-	return e.runner.VKDial(meeting, bearer, onClose)
-}
-
-// VKHangup implements admin.CtrlBackend.
-func (m *Manager) VKHangup(inboundID, sessionID string) {
-	m.mu.Lock()
-	e, ok := m.entries[inboundID]
-	m.mu.Unlock()
-	if !ok {
-		return
-	}
-	e.runner.VKHangup(sessionID)
-}
-
-// VKInboundInfo implements admin.CtrlBackend.
-func (m *Manager) VKInboundInfo(inboundID string) (tag, codec string, busy, ok bool) {
-	m.mu.Lock()
-	e, found := m.entries[inboundID]
-	m.mu.Unlock()
-	if !found || e.runner.Spec.VKCalls == nil || !e.runner.Spec.VKCalls.AcceptClientMeeting {
-		return "", "", false, false
-	}
-	codec, busy = e.runner.VKInfo()
-	return e.runner.Spec.Tag, codec, busy, true
-}
-
 // Add registers a new inbound and starts it (if Enabled). Returns an
 // error if the ID is already in use.
 //

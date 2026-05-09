@@ -348,14 +348,6 @@ func buildConnStr(spec inbound.Spec, publicAdminURL string) (string, error) {
 	if spec.VKCalls != nil && spec.VKCalls.Codec != "" {
 		p.Codec = spec.VKCalls.Codec
 	}
-	// VK client-meeting mode (S2/S3): meeting URL из connstr убираем,
-	// клиент его сам подставит локально. В обмен — lobby bootstrap
-	// (lobby_meeting_url + bearer).
-	if spec.VKCalls != nil && spec.VKCalls.AcceptClientMeeting && spec.VKCalls.LobbyMeetingURL != "" {
-		p.Meeting = ""
-		p.LobbyMeetingURL = spec.VKCalls.LobbyMeetingURL
-		p.Bearer = spec.VKCalls.CtrlBearer
-	}
 	if spec.ClientWGPrivateKey != "" && spec.ServerWGPublicKey != "" && spec.WGSubnet != "" {
 		p.WGClientPrivate = spec.ClientWGPrivateKey
 		p.WGServerPublic = spec.ServerWGPublicKey

@@ -154,16 +154,6 @@ type VKCallsConnect struct {
 	// Эксперимент: по PoC findings VP8 видео на VK SFU шейпится менее
 	// агрессивно, чем H.264.
 	Codec string
-
-	// PreAuthResult — opaque pre-authed VK auth result. Если задан,
-	// vkcalls.Transport пропускает свой auth-ladder и реюзит этот
-	// результат. Используется в lobby flow: pre-auth уже занял peer
-	// slot в target meeting'е, второй auth даст другой peer slot и
-	// сломёт client'ский targetRemoteID.
-	//
-	// Тип — `any` чтобы избежать import cycle (vkcalls.AuthResult
-	// нельзя референсить из пакета sfu). Type-asserted в vkcalls.
-	PreAuthResult any
 }
 
 // VKCaptchaSolver is invoked when VK's anonymous-login surface

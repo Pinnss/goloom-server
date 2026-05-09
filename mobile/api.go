@@ -108,10 +108,6 @@ type Client struct {
 	displayName string
 	listenAddr  string
 	connStr     string
-	// vkTargetMeeting — VK call link, заданный native-стороной из
-	// локального UI поля. В client-meeting режиме (S2/S3) connstr.Meeting
-	// пустой; user вводит meeting сам и Kotlin'ом ставит сюда.
-	vkTargetMeeting string
 	// vkProfileStorePath — путь к JSON-файлу VK FP пула на устройстве
 	// (typically <files_dir>/vkcalls/profiles.json). Если задан,
 	// успешные captcha-solve'ы захватывают device/browser_fp/UA в
@@ -170,15 +166,6 @@ func (c *Client) SetBrowserLauncher(l BrowserLauncher) {
 	c.phaseMu.Lock()
 	c.browserCB = l
 	c.phaseMu.Unlock()
-}
-
-// SetVKTargetMeeting устанавливает meeting URL для client-meeting
-// режима (S2/S3). Native-side вызывает перед Connect когда у connstr
-// LobbyMeetingURL заполнен, а user из UI ввёл свой meeting URL.
-func (c *Client) SetVKTargetMeeting(url string) {
-	c.mu.Lock()
-	c.vkTargetMeeting = url
-	c.mu.Unlock()
 }
 
 // SetVKProfileStorePath включает client-side captcha auto-replay.
@@ -273,15 +260,12 @@ func (c *Client) Connect(connectionString string, listenAddr string) (string, er
 	c.mu.Lock()
 	c.cancel = cancel
 	c.connectedTo = params.Meeting
-	if params.LobbyMeetingURL != "" && c.vkTargetMeeting != "" {
-		c.connectedTo = c.vkTargetMeeting
-	}
 	c.mu.Unlock()
 
 	c.emitPhase("init", "")
 
 	// Dispatch на нужный transport. Telemost — старый монолитный
-	// session.SetupSession path. VK Calls — lobby flow + vkcalls.Transport.
+	// session.SetupSession path. VK Calls — vkcalls.Transport.
 	var res ConnectResult
 	switch params.Transport {
 	case "vk-calls":

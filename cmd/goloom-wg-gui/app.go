@@ -215,7 +215,7 @@ func (a *App) ActiveProfileID() string {
 // tunnel automatically (only effective if the connstr embedded
 // the WG client config — wb-stream connstrs that ship without
 // WG keys silently keep AutoWG off).
-func (a *App) ImportProfile(connstr, name string, autoWG bool, vkTargetMeeting string) (Profile, error) {
+func (a *App) ImportProfile(connstr, name string, autoWG bool) (Profile, error) {
 	if a.profiles == nil {
 		return Profile{}, errors.New("profile store unavailable")
 	}
@@ -224,12 +224,6 @@ func (a *App) ImportProfile(connstr, name string, autoWG bool, vkTargetMeeting s
 		return Profile{}, fmt.Errorf("decode connstr: %w", err)
 	}
 	cfg.AutoWG = autoWG && cfg.WG.Valid()
-	// Для VK lobby connstr'ов (нет 'm', есть 'lm'+'b') target meeting
-	// приходит из UI отдельным полем — frontend парсит connstr,
-	// детектит lobby режим, показывает дополнительный input.
-	if cfg.LobbyMeetingURL != "" && cfg.Bearer != "" && vkTargetMeeting != "" {
-		cfg.Meeting = vkTargetMeeting
-	}
 	return a.profiles.Add(name, cfg)
 }
 

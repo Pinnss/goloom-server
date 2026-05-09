@@ -39,8 +39,6 @@ const els = {
     ptitle:         document.getElementById('profile-dialog-title'),
     pname:          document.getElementById('pf-name'),
     pconnstr:       document.getElementById('pf-connstr'),
-    pvkTargetBlock: document.getElementById('pf-vk-target-block'),
-    pvkTarget:      document.getElementById('pf-vk-target'),
     ptransport:     document.getElementById('pf-transport'),
     pmeeting:       document.getElementById('pf-meeting'),
     plkRoom:        document.getElementById('pf-lk-room'),
@@ -224,8 +222,6 @@ function openProfileDialog(profile) {
     els.ptitle.textContent = profile ? 'Редактировать профиль' : 'Новый профиль';
     els.pname.value = profile ? profile.name : '';
     els.pconnstr.value = '';
-    els.pvkTarget.value = '';
-    els.pvkTargetBlock.hidden = true;
     els.pError.textContent = '';
 
     // Populate manual fields. For edit mode, also default to manual
@@ -271,31 +267,6 @@ function refreshManualTransportFields() {
 // Parse goloom://... connstr на JS-стороне (base64url + JSON). Возвращает
 // объект полей или null если строка невалидна. Используется чтобы
 // детектить lobby режим и показать поле VK Call link.
-function parseConnstrLocal(s) {
-    if (!s || typeof s !== 'string') return null;
-    s = s.trim();
-    if (!s.startsWith('goloom://')) return null;
-    let payload = s.slice('goloom://'.length);
-    // base64url → base64.
-    payload = payload.replace(/-/g, '+').replace(/_/g, '/');
-    while (payload.length % 4) payload += '=';
-    try {
-        const json = atob(payload);
-        return JSON.parse(json);
-    } catch (e) {
-        return null;
-    }
-}
-
-// Показать/скрыть VK target meeting input в зависимости от того, что
-// в connstr (нужен только для VK lobby — есть 'lm'/'b', нет 'm').
-function refreshVKTargetVisibility() {
-    const cs = (els.pconnstr.value || '').trim();
-    const p = parseConnstrLocal(cs);
-    const isLobby = p && p.t === 'vk-calls' && p.lm && p.b && !p.m;
-    els.pvkTargetBlock.hidden = !isLobby;
-}
-
 async function saveProfileFromDialog() {
     els.pError.textContent = '';
     const activeTab = document.querySelector('.tab.tab-active').dataset.tab;
@@ -323,8 +294,7 @@ async function saveProfileFromDialog() {
                 els.pError.textContent = 'Для редактирования используй вкладку «Вручную».';
                 return;
             }
-            const vkTarget = (els.pvkTarget.value || '').trim();
-            saved = await window.go.main.App.ImportProfile(cs, name, !!els.pAutoWG.checked, vkTarget);
+            saved = await window.go.main.App.ImportProfile(cs, name, !!els.pAutoWG.checked);
         } else {
             // Manual mode preserves the existing WG block (when
             // editing a connstr-imported profile) so toggling
@@ -350,13 +320,6 @@ async function saveProfileFromDialog() {
                 listen_addr: (els.plisten.value || '').trim(),
                 auto_wg: !!els.pAutoWG.checked,
                 wg: existing.wg || {},
-                // Preserve VK lobby bootstrap fields (in-band ctrl
-                // S2/S3) — manual-edit form НЕ должен их затирать,
-                // иначе после редактирования профиль превращается из
-                // lobby в legacy-direct-meeting и Connect фейлится
-                // на сервере (no meeting in inbound).
-                lobby_meeting_url: existing.lobby_meeting_url || '',
-                bearer:            existing.bearer || '',
             };
             saved = await window.go.main.App.SaveProfile(editingProfileId || '', name, cfg);
         }
@@ -426,9 +389,6 @@ function boot() {
     els.btnAdd.addEventListener('click', () => openProfileDialog(null));
     els.btnAddEmpty.addEventListener('click', () => openProfileDialog(null));
 
-    // Live update: показываем поле VK Call link при вставке lobby
-    // connstr'а (имеет 'lm'+'b' но пустой 'm').
-    els.pconnstr.addEventListener('input', refreshVKTargetVisibility);
     els.btnEdit.addEventListener('click', () => {
         const p = selectedProfile();
         if (p) openProfileDialog(p);

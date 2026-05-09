@@ -28,20 +28,6 @@ type Params struct {
 	// Клиент должен совпадать с серверным codec'ом инбаунда.
 	Codec string `json:"c,omitempty"`
 
-	// LobbyMeetingURL + Bearer (S2/S3 in-band): rendezvous-канал
-	// внутри VK SFU. Клиент peer-join'ится в LobbyMeetingURL
-	// (стабильный VK звонок), находит сервер в roster'е, шлёт
-	// goloom_ctrl DIAL{meeting,bearer} через transmit-data envelope.
-	// Сервер на DIAL поднимает session'ную сторону и идёт в target
-	// meeting. Клиент тоже идёт в target и они peer-connect'ятся.
-	//
-	// Bootstrap полностью через videowebrtc.okcdn.ru — никакого
-	// прямого WSS клиента к нашему VPS.
-	//
-	// Пусто → клиент использует Meeting из этой структуры (legacy).
-	LobbyMeetingURL string `json:"lm,omitempty"`
-	Bearer          string `json:"b,omitempty"`
-
 	// WG-related fields. Populated by the admin panel when an inbound
 	// has been auto-provisioned, so the client can build its WG config
 	// from a single connection string instead of having the user copy a
@@ -51,12 +37,6 @@ type Params struct {
 	WGClientAddr    string `json:"wga,omitempty"`  // client tunnel address with prefix, e.g. "10.66.1.2/24"
 	WGEndpoint      string `json:"wge,omitempty"`  // endpoint to dial, e.g. "127.0.0.1:51820"
 	WGDNS           string `json:"wgd,omitempty"`  // comma-separated DNS list, e.g. "1.1.1.1,8.8.8.8"
-}
-
-// HasLobby сообщает, есть ли в connstr данные для in-band lobby
-// bootstrap'а (S2/S3 client-meeting mode).
-func (p *Params) HasLobby() bool {
-	return p.LobbyMeetingURL != "" && p.Bearer != ""
 }
 
 // HasWG reports whether the connection string carries a usable embedded
@@ -109,11 +89,8 @@ func Decode(s string) (*Params, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("json decode: %w", err)
 	}
-	// Meeting URL обязателен ИЛИ должен быть lobby bootstrap. В
-	// client-meeting mode (S2/S3) клиент сам подставляет meeting
-	// из локальной формы, а в connstr остаются только lobby fields.
-	if p.Meeting == "" && !p.HasLobby() {
-		return nil, fmt.Errorf("meeting URL or lobby bootstrap required")
+	if p.Meeting == "" {
+		return nil, fmt.Errorf("meeting URL required")
 	}
 	return &p, nil
 }

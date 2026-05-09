@@ -54,11 +54,10 @@ type Options struct {
 	// future direct-WG mode would use the VPS's public IP here.
 	PublicEndpointHint string
 
-	// PublicURL — внешний URL admin-сервера. Пробрасывается клиенту
-	// в connstr (CtrlURL) для S2/S3 client-meeting mode. Пример:
-	// "https://vps.example.com:9443". Если пусто, ctrl-ws bootstrap
-	// в connstr не пишется и client-meeting инбаунды доступны
-	// только через ручной ввод URL'а.
+	// PublicURL — внешний URL admin-сервера. Используется для построения
+	// public ссылок на UI (admin dashboard, client connstrs где нужно
+	// показать оператору). Пример: "https://vps.example.com:9443".
+	// Если пусто — fallback на Listen со схемой https.
 	PublicURL string
 
 	// CaptchaBroker, when non-nil, exposes the VK Calls admin-webview
@@ -114,11 +113,6 @@ func New(opts Options) (*Server, error) {
 		opts.CaptchaBroker.AttachToMux(mux)
 		mux.HandleFunc("GET /api/captcha/pending", s.handleCaptchaPending)
 	}
-
-	// (Удалён ctrl-ws endpoint в пользу in-band lobby bootstrap'а —
-	// клиент теперь общается с сервером через VK SFU signaling в
-	// lobby звонке, никаких прямых WSS-коннектов к admin :9443.
-	// См. internal/sfu/vkcalls/lobby.go.)
 
 	s.srv = &http.Server{
 		Addr:              opts.Listen,

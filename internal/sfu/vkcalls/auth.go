@@ -53,14 +53,6 @@ type AuthSpec struct {
 	// captchaNotRobot.check response) and returns the value the
 	// retry needs. Leave nil to fail-fast on captcha.
 	Solver sfu.VKCaptchaSolver
-
-	// PreAuth — если задан, DoAuth возвращает его без перевыполнения
-	// auth-ladder'а. Используется в lobby flow: после
-	// PreAuthForTarget мы УЖЕ заняли peer slot в target meeting'е
-	// (joinConversationByLink сделал нас анонимным участником);
-	// повторный DoAuth внутри transport.Connect создаст НОВОГО
-	// peer'а с другим userID и client'ский targetRemoteID мискнёт.
-	PreAuth *AuthResult
 }
 
 // AuthResult captures everything we need from the 3-call ladder.
@@ -90,10 +82,6 @@ type AuthResult struct {
 // DoAuth runs the 4-step ladder. Returns enough state to open the
 // peer-join WSS.
 func DoAuth(ctx context.Context, lg *log.Logger, spec AuthSpec) (*AuthResult, error) {
-	if spec.PreAuth != nil {
-		lg.Printf("auth: reusing pre-authed result userId=%s peerId=%s", spec.PreAuth.UserID, spec.PreAuth.PeerID)
-		return spec.PreAuth, nil
-	}
 	client := &http.Client{}
 	res := &AuthResult{}
 

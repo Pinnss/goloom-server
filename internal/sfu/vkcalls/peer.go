@@ -96,12 +96,6 @@ type peer struct {
 	// в [tunnel.Receiver]'ы. nil для h264 mode.
 	remoteTracks chan *webrtc.TrackRemote
 
-	// controlListener (lobby mode only) — callback на goloom_ctrl
-	// сообщения внутри transmit-data. Когда задан, peer работает в
-	// lobby-режиме: НЕТ buildPC, НЕТ SDP/ICE обработки, role="lobby".
-	// Используется для in-band DIAL bootstrap'а.
-	controlListener func(from int64, ctrl GoloomCtrl)
-
 	// pending ICE candidates received before the remote SDP is set.
 	pendingMu  sync.Mutex
 	pendingICE []webrtc.ICECandidateInit
@@ -168,7 +162,7 @@ func dialPeer(ctx context.Context, lg *log.Logger, auth *AuthResult, role, codec
 		pp.remoteTracks = make(chan *webrtc.TrackRemote, 8)
 	}
 	// VKCALLS_TARGET_REMOTE_ID — диагностический env var: forces
-	// adoptParticipants принять конкретный peer userID. Помогает
+	// adoptParticipants принять конкретный peer userID. Полезно
 	// в multi-peer тестах когда roster засран зомби-сессиями.
 	if v := os.Getenv("VKCALLS_TARGET_REMOTE_ID"); v != "" {
 		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id != 0 {
@@ -585,34 +579,6 @@ func (p *peer) handleTransmittedData(msg map[string]any) {
 		p.remoteID = from
 	}
 
-	// In-band ctrl envelope: { "goloom_ctrl": "DIAL", ... }.
-	// Передаётся через тот же transmit-data что и SDP, отличается
-	// наличием поля goloom_ctrl. Lobby peer ничего не делает с
-	// SDP/ICE — только маршрутизирует ctrl listener'у.
-	if ctrlType, ok := data["goloom_ctrl"].(string); ok && ctrlType != "" {
-		ctrl := GoloomCtrl{
-			Type:       ctrlType,
-			MeetingURL: stringField(data, "meeting_url"),
-			Bearer:     stringField(data, "bearer"),
-			SessionID:  stringField(data, "session_id"),
-			Phase:      stringField(data, "phase"),
-			Detail:     stringField(data, "detail"),
-			Reason:     stringField(data, "reason"),
-		}
-		if v, ok := data["server_target_user_id"].(float64); ok {
-			ctrl.ServerTargetUserID = int64(v)
-		} else if s, ok := data["server_target_user_id"].(string); ok {
-			// JSON может прислать как строку если userID > 2^53.
-			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-				ctrl.ServerTargetUserID = n
-			}
-		}
-		if p.controlListener != nil {
-			p.controlListener(from, ctrl)
-		}
-		return
-	}
-
 	if sdpWrap, ok := data["sdp"].(map[string]any); ok {
 		typ, _ := sdpWrap["type"].(string)
 		sdp, _ := sdpWrap["sdp"].(string)
@@ -629,12 +595,6 @@ func (p *peer) handleTransmittedData(msg map[string]any) {
 	}
 }
 
-func stringField(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
 
 func (p *peer) handleOffer(sdp string, msg map[string]any) {
 	if pid, ok := msg["participantId"].(float64); ok && p.remoteID != int64(pid) {
