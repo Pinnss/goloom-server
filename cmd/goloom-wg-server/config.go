@@ -27,7 +27,7 @@ type AdminConfig struct {
 
 	// PublicURL — внешний URL admin-сервера для клиентских ctrl-ws
 	// подключений (S2/S3). Используется при генерации connstr'а.
-	// Пример: "https://45.43.89.67:9443". Если пусто — Listen
+	// Пример: "https://vps.example.com:9443". Если пусто — Listen
 	// fallback'ится с https-схемой.
 	PublicURL string `yaml:"public_url,omitempty"`
 

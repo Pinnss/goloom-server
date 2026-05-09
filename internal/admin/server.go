@@ -56,7 +56,7 @@ type Options struct {
 
 	// PublicURL — внешний URL admin-сервера. Пробрасывается клиенту
 	// в connstr (CtrlURL) для S2/S3 client-meeting mode. Пример:
-	// "https://45.43.89.67:9443". Если пусто, ctrl-ws bootstrap
+	// "https://vps.example.com:9443". Если пусто, ctrl-ws bootstrap
 	// в connstr не пишется и client-meeting инбаунды доступны
 	// только через ручной ввод URL'а.
 	PublicURL string

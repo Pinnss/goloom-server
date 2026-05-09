@@ -118,8 +118,9 @@ type VKCallsSpec struct {
 	//                       captcha challenge. Useful when you
 	//                       expect the call link to bypass captcha
 	//                       (e.g. cached IP-bound exemptions).
-	//   - "admin-webview" — TODO; the admin panel proxies the
-	//                       captcha to a connected admin browser.
+	//   - "admin-webview" — admin panel proxies the captcha to a
+	//                       connected admin browser via the
+	//                       CaptchaBroker (default for headless VPS).
 	//
 	// Empty defaults to "auto".
 	CaptchaMode string `yaml:"captcha_mode,omitempty" json:"captcha_mode,omitempty"`

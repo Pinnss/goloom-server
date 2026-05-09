@@ -90,6 +90,17 @@
             <label class="field-label" for="pf-connstr">Connection string из админки</label>
             <textarea id="pf-connstr" class="field" rows="3" autocomplete="off"
                       placeholder="goloom://eyJ..."></textarea>
+
+            <!--
+              Доп. поле, видно только когда impасный connstr — VK lobby
+              (есть lm/b, нет m). На сервере target meeting не зашит,
+              user сам выбирает к какому VK звонку коннектиться.
+            -->
+            <div id="pf-vk-target-block" hidden>
+                <label class="field-label" for="pf-vk-target">VK Call link <span style="color:#888;font-weight:normal">(где сервер поднимет туннель)</span></label>
+                <input id="pf-vk-target" class="field" type="text" autocomplete="off"
+                       placeholder="https://vk.com/call/join/..."/>
+            </div>
         </div>
 
         <div class="tab-pane" data-pane="manual" hidden>

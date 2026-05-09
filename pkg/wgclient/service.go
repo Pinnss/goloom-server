@@ -569,6 +569,29 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	connectSpec := s.buildConnectSpec(cfg)
 	lg.Printf("connecting via transport=%s", connectSpec.Kind)
 
+	// Mid-session VK re-captcha hits a routing trap when AutoWG is up:
+	// the captcha proxy's outbound HTTPS to vk.com goes via the WG
+	// default route, but the VK SFU session is exactly what the
+	// captcha is supposed to repair — so the proxy hangs until the
+	// user manually restarts WG. Wrap the solver so each invocation
+	// re-resolves the VK hosts and refreshes their /32 excludes
+	// through the original gateway. Cheap (one DNS round-trip) and
+	// makes captcha load even mid-session. Status sub-phase is
+	// flipped to "captcha" for the GUI chip.
+	if connectSpec.VKCalls != nil && connectSpec.VKCalls.CaptchaSolver != nil {
+		base := connectSpec.VKCalls.CaptchaSolver
+		connectSpec.VKCalls.CaptchaSolver = func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
+			s.setStatus(func(st *Status) { st.SubPhase = "captcha"; st.Detail = "" })
+			if ips, err := vkcalls.ResolveSFUIPs(); err == nil {
+				lg.Printf("captcha: refreshing %d VK /32 excludes via original gateway", len(ips))
+				_ = rm.ExcludeIPs(ips)
+			} else {
+				lg.Printf("WARN captcha route refresh: %v", err)
+			}
+			return base(ctx, ch)
+		}
+	}
+
 	// In-band lobby bootstrap (S2/S3 client-meeting mode): если в
 	// connstr есть LobbyMeetingURL + Bearer — peer-join'имся в lobby
 	// VK звонок, находим там сервер, шлём goloom_ctrl DIAL с meeting
