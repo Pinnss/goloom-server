@@ -1,40 +1,46 @@
-# Installation
+# Server install
 
-End-to-end setup of `goloom-wg-server` on a fresh Ubuntu/Debian VPS.
+[Русская версия](INSTALL.ru.md)
+
+End-to-end setup of `goloom-wg-server` on a fresh Debian/Ubuntu VPS.
 
 ## Prerequisites
 
-- A VPS with a public IPv4 (any 1 vCPU / 1 GB RAM works)
-- Root access via SSH
-- A working Yandex account (for Telemost meeting URLs)
-- Open ports: TCP 9443 (admin), UDP 51820+ (one per inbound)
+- A VPS with a public IPv4 (1 vCPU / 1 GB RAM is enough)
+- Root SSH access
+- Open ports: TCP 9443 (admin panel), UDP 51820+ (one per inbound)
+- For VK Calls inbounds: a desktop session OR the `admin-webview` captcha mode (no GUI needed; see [USAGE.md](USAGE.md))
 
-## 1. Build the binary
+## 1. Download the server binary
 
-On any machine with Go 1.22+:
+From the [Releases page](https://github.com/Pinnss/goloom-server/releases) grab the binary for your VPS architecture:
+
+```bash
+# amd64 (most VPS providers):
+wget -O goloom-wg-server \
+  https://github.com/Pinnss/goloom-server/releases/latest/download/goloom-wg-server-linux-amd64
+chmod +x goloom-wg-server
+
+# arm64 (Hetzner CAX, Oracle Ampere, AWS Graviton, …):
+wget -O goloom-wg-server \
+  https://github.com/Pinnss/goloom-server/releases/latest/download/goloom-wg-server-linux-arm64
+chmod +x goloom-wg-server
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/Pinnss/goloom-server.git
 cd goloom-server
-go build -o goloom-wg-server ./cmd/goloom-wg-server
-```
-
-Cross-compile for the VPS if you're on a different OS/arch:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o goloom-wg-server ./cmd/goloom-wg-server
-```
-
-Copy the binary to the VPS:
-
-```bash
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+  -o goloom-wg-server ./cmd/goloom-wg-server
 scp goloom-wg-server root@your-vps:/root/
 ```
 
-## 2. System prep on VPS
+## 2. System prep on the VPS
 
 ```bash
-# WireGuard tooling
+# WireGuard tools
 apt update
 apt install -y wireguard wireguard-tools iptables
 
@@ -45,77 +51,90 @@ sysctl -p /etc/sysctl.d/99-goloom.conf
 
 ## 3. Bootstrap WireGuard
 
-The unit file requires `wg-quick@wg0.service` to be active before the goloom server starts. Create a minimal `/etc/wireguard/wg0.conf`:
+The systemd unit requires `wg-quick@wg0.service` to be active before goloom starts. Create a minimal `/etc/wireguard/wg0.conf`:
 
 ```ini
 [Interface]
-Address = 10.66.0.1/24
-ListenPort = 51820
 PrivateKey = <output of `wg genkey`>
-
-PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.66.0.0/24 -o ens3 -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.66.0.0/24 -o ens3 -j MASQUERADE
+Address    = 10.66.0.1/24
+ListenPort = 51820
 ```
 
-Replace `ens3` with your default-route interface (`ip -4 route show default | awk '{print $5}'`).
-
-Then bring it up:
+Set permissions and enable:
 
 ```bash
 chmod 600 /etc/wireguard/wg0.conf
 systemctl enable --now wg-quick@wg0
 ```
 
+The admin panel will create per-inbound `wg<N>.conf` files automatically — `wg0` is just a placeholder.
+
 ## 4. Install goloom-wg-server
 
 In the directory containing the binary, the example config, and the deploy assets:
 
 ```bash
-cd ~/  # where goloom-wg-server (the binary) is
-cp goloom-wg-server.yaml.example goloom-wg-server.yaml
-# Default-конфиг работает без правок. Если порт `:9443` занят или хочешь
-# слушать только на loopback — отредактируй `admin.listen`.
+# Create the working layout:
+mkdir -p deploy
+wget -O goloom-wg-server.yaml \
+  https://github.com/Pinnss/goloom-server/raw/main/goloom-wg-server.yaml.example
+wget -O deploy/install.sh \
+  https://github.com/Pinnss/goloom-server/raw/main/deploy/install.sh
+wget -O deploy/goloom-wg-server.service \
+  https://github.com/Pinnss/goloom-server/raw/main/deploy/goloom-wg-server.service
 
+# (Optional) edit goloom-wg-server.yaml — defaults work for most setups.
+# Common tweaks: admin.listen port, network.wg_subnet_base.
+
+# Run the installer (copies binary to /opt/goloom, drops the systemd
+# unit, enables the service):
 bash deploy/install.sh
 systemctl start goloom-wg-server
 journalctl -u goloom-wg-server -n 50
 ```
 
-При первом запуске в логах будет сгенерированная пара логин/пароль:
+The first start prints a one-time admin password:
+
 ```
 ADMIN bootstrap credentials → username=admin  password=abc123def456...
 ```
-Запиши пароль (он печатается один раз) и заходи на `https://<vps>:9443`.
-В панели сразу появится красный баннер с просьбой сменить — сделай через
-"⚙ Аккаунт".
+
+Capture it (printed only once) and open `https://<vps-ip>:9443` in a browser. You'll get a self-signed cert warning — accept it. Log in, then immediately change the password via "⚙ Аккаунт".
 
 ## 5. Provision your first inbound
 
-Open `https://<vps-ip>:9443/?token=<your-token>` in a browser. You'll get a self-signed cert warning on first visit — accept it.
+In the dashboard click **+ Создать inbound**:
 
-Click **Create inbound** → set a tag (e.g. "main") → save. The panel returns a `goloom://…` connection string + QR code.
+- **Tag** — display name, e.g. `home`
+- **Transport** — `Telemost`, `WB Stream`, or `VK Calls`
+- **Meeting URL** — the conference link (or VK call link, or WB Stream room URL)
+- **Captcha mode** (VK only) — `admin-webview` for headless servers; the panel itself proxies the captcha to your browser
 
-Hand the QR / string off to your client (mobile or desktop). Done.
+Save. The panel returns a `goloom://...` connection string + QR code. Hand it to your client.
 
-## 6. Per-inbound iptables
+For WB Stream inbounds you also need to capture browser cookies once — see [USAGE.md → WB Stream auth](USAGE.md#wb-stream-auth).
 
-`goloom-wg-server` automatically writes `/etc/wireguard/wg<N>.conf` for each inbound and brings the interface up. You don't normally need to touch iptables — the wg-quick `PostUp` hook in the generated config handles MASQUERADE and FORWARD rules.
+## 6. Updating
 
-If you migrate the server to a new VPS or change the default-route interface, edit each `wg<N>.conf` to point at the new interface and `systemctl restart wg-quick@wg<N>`.
-
-## 7. Updating
+When a new release lands:
 
 ```bash
-# Build the new binary, scp it over, then on the VPS:
+wget -O /tmp/goloom-wg-server.new \
+  https://github.com/Pinnss/goloom-server/releases/latest/download/goloom-wg-server-linux-amd64
+chmod +x /tmp/goloom-wg-server.new
 systemctl stop goloom-wg-server
-mv goloom-wg-server /opt/goloom/goloom-wg-server
+mv /tmp/goloom-wg-server.new /opt/goloom/goloom-wg-server
 systemctl start goloom-wg-server
 ```
 
-Existing inbounds and their `goloom://…` strings keep working across upgrades.
+Existing inbounds and their `goloom://...` strings keep working across upgrades.
 
 ## Troubleshooting
 
-- **Admin panel doesn't load**: check `journalctl -u goloom-wg-server -n 50` and verify port 9443 is open in your hosting provider's firewall.
-- **Client connects but no internet**: check `iptables -t nat -L POSTROUTING -nv | grep MASQUERADE` — there should be a rule for `10.66.<N>.0/24`. If it's missing, `wg-quick down wg<N> && wg-quick up wg<N>` re-applies the PostUp.
-- **`peer initiated re-handshake` errors**: the server has stale peer state from a prior client crash. Recreate the inbound from the panel and re-import on the client.
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Admin panel doesn't load | Port 9443 closed in provider firewall | Open in firewall config |
+| Client connects but no internet | Missing MASQUERADE rule | `wg-quick down wg<N> && wg-quick up wg<N>` re-applies the PostUp |
+| `peer initiated re-handshake` errors | Stale peer state from a prior client crash | Recreate the inbound from the panel and re-import on the client |
+| VK inbound stuck on `auth_pending` | Captcha needs solving | Click the 🛡 badge in the dashboard, solve in one click |
+| WB Stream inbound on `auth_required` | Cookies expired (~14 days) | Re-run the bookmarklet, paste new tokens (see USAGE.md) |

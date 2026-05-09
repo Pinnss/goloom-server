@@ -18,6 +18,8 @@
 # Build outputs
 /build/
 /dist/
+/mobile/build/
+# Note: /mobile/dist/goloom.aar IS committed — it's the published SDK.
 
 # Local configs (per-deployment)
 /goloom-wg-server.yaml

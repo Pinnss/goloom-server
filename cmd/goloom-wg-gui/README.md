@@ -1,43 +1,27 @@
-# README
+# Goloom WG GUI (Windows)
 
-## About
+Wails-based desktop client. Connects via Telemost / WB Stream / VK Calls, manages profiles, and runs the WireGuard userspace tunnel in-process — no separate WireGuard install required.
 
-This template uses plain JS / HTML and CSS.
+## Download
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
+Pre-built `goloom-wg-gui-windows-amd64.zip` is on the [Releases page](https://github.com/Pinnss/goloom-server/releases). Unzip, right-click `goloom-wg-gui.exe` → **Run as administrator** (needed for split-tunnel routes).
 
-## Live Development
+## Build from source
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
-
-## Building
-
-Use the build wrapper:
+Prerequisites:
+- Go 1.22+
+- [Wails CLI v2](https://wails.io/docs/gettingstarted/installation): `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
+- Windows with the WebView2 runtime (already installed on Win10 21H2+ / Win11)
 
 ```bash
-./build-windows.sh
+cd cmd/goloom-wg-gui
+wails build -platform windows/amd64
 ```
 
-Output lands at `build/bin/goloom-wg-gui.exe`.
+Output: `build/bin/goloom-wg-gui.exe` (≈ 39 MB).
 
-The wrapper exists because vanilla `wails build` collides with the
-`resource_windows_*.syso` files we ship for icon + admin-manifest
-(too many .rsrc sections). The script stashes the .syso aside,
-invokes wails, then restores them.
+The icon and version metadata are baked in via the `resource_windows_*.syso` files committed alongside this README.
 
-**Caveat**: the stashed-aside .syso doesn't make it into the
-binary, so the resulting exe has Wails' default asInvoker
-manifest. **Launch via right-click → Run as administrator** (or
-pin a shortcut with the "Run as administrator" advanced flag).
-A clean fix would post-process the binary with rcedit/mt.exe —
-not currently wired up.
+## Usage
 
-If you'd rather skip the wails pipeline and rely on the embedded
-`//go:embed all:frontend/src` (smaller binary, no Wails-runtime
-hooks), `go build .` works too — but you'll lose the live-reload
-dev server and may hit subtle differences vs. the Wails-built
-version. Stick with `build-windows.sh` for production.
+See [`docs/USAGE.md`](../../docs/USAGE.md#windows-gui) ([RU](../../docs/USAGE.ru.md#windows-gui)) for the connection workflow.
