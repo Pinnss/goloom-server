@@ -55,34 +55,61 @@ templ InboundCard(s inbound.Status) {
 				<dt class="text-muted">WG iface</dt>
 				<dd class="font-mono text-right">{ s.WGIface }</dd>
 			}
-			<dt class="text-muted">↑ TX</dt>
-			<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.TxPackets, humanBytes(s.TxBytes)) }</dd>
-			<dt class="text-muted">↓ RX</dt>
-			<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.RxPackets, humanBytes(s.RxBytes)) }</dd>
+			if s.RelayListen != "" {
+				<dt class="text-muted">Relay listen</dt>
+				<dd class="font-mono text-right">{ s.RelayListen }</dd>
+				<dt class="text-muted">Active / Accepted</dt>
+				<dd class="font-mono text-right">{ fmt.Sprintf("%d / %d", s.RelayActive, s.RelayAccepted) }</dd>
+			} else {
+				<dt class="text-muted">↑ TX</dt>
+				<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.TxPackets, humanBytes(s.TxBytes)) }</dd>
+				<dt class="text-muted">↓ RX</dt>
+				<dd class="font-mono text-right">{ fmt.Sprintf("%d / %s", s.RxPackets, humanBytes(s.RxBytes)) }</dd>
+			}
 			if s.LastError != "" {
 				<dt class="text-muted">error</dt>
 				<dd class="text-danger text-right break-all">{ s.LastError }</dd>
 			}
 		</dl>
 
-		<div class="flex items-center justify-center bg-white rounded p-2">
-			<img src={ "/api/inbounds/" + s.ID + "/qr.png" } alt="QR" class="max-w-[180px] aspect-square"/>
-		</div>
-
-		<div class="flex flex-wrap gap-1.5 mt-1">
-			<button
-				class="btn-primary text-xs px-2 py-1"
-				hx-get={ "/htmx/inbound/" + s.ID + "/connstr" }
-				hx-target="#toast"
-				hx-swap="innerHTML"
-				title="Скопировать connection string"
-			>{ "📋 connection" }</button>
-			<a
-				class="btn-ghost text-xs px-2 py-1"
-				href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
-				download
-			>{ "⬇ wg.conf" }</a>
-		</div>
+		if s.RelayListen != "" {
+			<div class="flex items-center justify-center bg-white rounded p-2">
+				<img src={ "/api/inbounds/" + s.ID + "/vkturn-qr.png" } alt="vk-turn QR" class="max-w-[180px] aspect-square"/>
+			</div>
+			<div class="flex flex-wrap gap-1.5 mt-1">
+				<button
+					class="btn-primary text-xs px-2 py-1"
+					hx-get={ "/htmx/inbound/" + s.ID + "/vkturn-link" }
+					hx-target="#toast"
+					hx-swap="innerHTML"
+					title="Скопировать vkturnproxy:// ссылку"
+				>{ "📋 vkturnproxy://" }</button>
+				<a
+					class="btn-ghost text-xs px-2 py-1"
+					href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
+					download
+					title="WireGuard config (для отладки, без vk-turn обёртки)"
+				>{ "⬇ wg.conf" }</a>
+			</div>
+		} else {
+			<div class="flex items-center justify-center bg-white rounded p-2">
+				<img src={ "/api/inbounds/" + s.ID + "/qr.png" } alt="QR" class="max-w-[180px] aspect-square"/>
+			</div>
+			<div class="flex flex-wrap gap-1.5 mt-1">
+				<button
+					class="btn-primary text-xs px-2 py-1"
+					hx-get={ "/htmx/inbound/" + s.ID + "/connstr" }
+					hx-target="#toast"
+					hx-swap="innerHTML"
+					title="Скопировать connection string"
+				>{ "📋 connection" }</button>
+				<a
+					class="btn-ghost text-xs px-2 py-1"
+					href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
+					download
+				>{ "⬇ wg.conf" }</a>
+			</div>
+		}
 	</div>
 }
 

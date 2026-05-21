@@ -24,6 +24,7 @@ templ InboundForm() {
 				<option value="telemost">Telemost</option>
 				<option value="wb_stream">WB Stream</option>
 				<option value="vk-calls">VK Calls</option>
+				<option value="vk-turn">VK TURN relay</option>
 			</select>
 		</div>
 
@@ -32,6 +33,7 @@ templ InboundForm() {
 				<span x-show="transport === 'telemost'">Meeting URL (Telemost)</span>
 				<span x-show="transport === 'wb_stream'">Room URL (WB Stream)</span>
 				<span x-show="transport === 'vk-calls'">VK Call link</span>
+				<span x-show="transport === 'vk-turn'">VK Call link (для TURN-credentials клиента)</span>
 			</label>
 			<input
 				class="field-input"
@@ -63,6 +65,30 @@ templ InboundForm() {
 				Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.
 			</p>
 			<input type="hidden" name="vk_role" value="receiver"/>
+		</div>
+
+		<div x-show="transport === 'vk-turn'" x-cloak class="flex flex-col gap-2">
+			<div>
+				<label class="field-label">Listen address (UDP)</label>
+				<input
+					class="field-input"
+					name="vk_turn_listen_addr"
+					placeholder="0.0.0.0:56001"
+					value="0.0.0.0:56001"
+				/>
+				<p class="text-xs opacity-60 mt-1">
+					Каждый vk-turn инбаунд должен слушать свой порт. Если на хосте уже работает внешний vk-turn-server на 56000 — поставь 56001+.
+				</p>
+			</div>
+			<div>
+				<label class="inline-flex items-center gap-2 text-sm">
+					<input type="checkbox" name="vk_turn_use_wrap"/>
+					<span>WRAP-обфускация (ChaCha20-XOR над DTLS)</span>
+				</label>
+				<p class="text-xs opacity-60 mt-1">
+					Делает поток неотличимым от шума для DPI. Ключ сгенерируется автоматически и попадёт в клиентскую ссылку.
+				</p>
+			</div>
 		</div>
 
 		<div>

@@ -3,9 +3,11 @@ package admin
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/connstr"
 	"github.com/Pinnss/goloom-server/internal/inbound"
+	vkturnpkg "github.com/Pinnss/goloom-server/internal/relay/vkturn"
 	"github.com/Pinnss/goloom-server/internal/wgprovision"
 )
 
@@ -62,6 +65,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/inbounds/{id}/client.conf", s.handleClientConf)
 	mux.HandleFunc("GET /api/inbounds/{id}/connstr", s.handleConnStr)
 	mux.HandleFunc("GET /api/inbounds/{id}/qr.png", s.handleQR)
+	mux.HandleFunc("GET /api/inbounds/{id}/vkturn-link", s.handleVKTurnLink)
+	mux.HandleFunc("GET /api/inbounds/{id}/vkturn-qr.png", s.handleVKTurnQR)
 	mux.HandleFunc("GET /api/system/wg-interfaces", s.handleListWGInterfaces)
 	mux.HandleFunc("GET /api/inbounds/{id}/history", s.handleInboundHistory)
 
@@ -118,15 +123,24 @@ type createInboundReq struct {
 	Meeting     string `json:"meeting"`
 	DisplayName string `json:"display_name"`
 
-	// Transport selects the SFU implementation. Form values:
-	//   "telemost"  → KindTelemost (default)
-	//   "wb_stream" → KindLiveKitWBStream
-	//   "vk-calls"  → KindVKCalls
+	// Transport selects the implementation. Form values:
+	//   "telemost"  → sfu.KindTelemost (default)
+	//   "wb_stream" → sfu.KindLiveKitWBStream
+	//   "vk-calls"  → sfu.KindVKCalls
+	//   "vk-turn"   → relay.KindVKTurn (separate listener-shaped family)
 	Transport string `json:"transport"`
 
 	// VKCaptchaMode + VKRole are honoured only when Transport=vk-calls.
 	VKCaptchaMode string `json:"vk_captcha_mode"`
 	VKRole        string `json:"vk_role"`
+
+	// VKTurnListenAddr / VKTurnUseWrap are honoured only when
+	// Transport=vk-turn. ListenAddr is the public UDP bind for the
+	// DTLS relay (e.g. "0.0.0.0:56001"). UseWrap toggles the
+	// ChaCha20-XOR obfuscation layer; the wrap key is auto-generated
+	// server-side and surfaced in the client-link payload.
+	VKTurnListenAddr string `json:"vk_turn_listen_addr"`
+	VKTurnUseWrap    bool   `json:"vk_turn_use_wrap"`
 
 	// AutoProvision asks the server to allocate a fresh wgN interface
 	// from the provisioner pool. If false, WGEndpoint must be supplied.
@@ -171,6 +185,25 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 			Role:        coalesceStr(req.VKRole, "receiver"),
 			CaptchaMode: coalesceStr(req.VKCaptchaMode, "admin-webview"),
 		}
+	case "vk-turn":
+		spec.Transport = "vk-turn"
+		if req.VKTurnListenAddr == "" {
+			http.Error(w, "vk_turn_listen_addr is required for vk-turn transport", http.StatusBadRequest)
+			return
+		}
+		spec.VKTurn = &inbound.VKTurnSpec{
+			ListenAddr: req.VKTurnListenAddr,
+			VKLink:     req.Meeting,
+			UseWrap:    req.VKTurnUseWrap,
+		}
+		if req.VKTurnUseWrap {
+			key, err := generateWrapKey()
+			if err != nil {
+				http.Error(w, "wrap key gen: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			spec.VKTurn.WrapKeyHex = key
+		}
 	default:
 		http.Error(w, "unknown transport: "+req.Transport, http.StatusBadRequest)
 		return
@@ -186,6 +219,23 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "allocate: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// vk-turn clients (anton48/Moroka8) require a non-empty
+		// PresharedKey in the wg config — generate one and bake it
+		// into both the wg-quick peer section (server side) and the
+		// Spec so the connection-link generator can surface it.
+		if spec.Transport == "vk-turn" {
+			psk, err := generateWGPresharedKey()
+			if err != nil {
+				http.Error(w, "preshared-key gen: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			alloc.PresharedKey = psk
+			if spec.VKTurn != nil {
+				spec.VKTurn.PresharedKey = psk
+			}
+		}
+
 		if err := s.opts.Provisioner.CreateInterface(alloc); err != nil {
 			http.Error(w, "create interface: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -302,6 +352,43 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(png)
 }
 
+// handleVKTurnLink returns a `vkturnproxy://import?data=…` link the
+// upstream anton48/Moroka8 vk-turn clients accept. Used as a stopgap
+// until goloom ships its own native vk-turn client.
+//
+// 400 for non-vk-turn inbounds. 500 if the inbound is missing the
+// auto-provisioned WG identity (operator created it without
+// AutoProvision and didn't paste keys manually).
+func (s *Server) handleVKTurnLink(w http.ResponseWriter, r *http.Request) {
+	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), errStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, uri)
+}
+
+// handleVKTurnQR is the QR-PNG counterpart of [handleVKTurnLink].
+func (s *Server) handleVKTurnQR(w http.ResponseWriter, r *http.Request) {
+	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), errStatus(err))
+		return
+	}
+	// vkturnproxy:// payload is ~700 chars (versioned JSON envelope
+	// with WG keys + VK URL); medium ECC + 320px keeps it scannable
+	// from a phone held a comfortable distance from a 1080p monitor.
+	png, err := qrcode.Encode(uri, qrcode.Medium, 320)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(png)
+}
+
 func buildClientConf(spec inbound.Spec, publicEndpoint string) string {
 	dnsLine := "DNS = 1.1.1.1, 8.8.8.8\n"
 	clientIP := strings.Replace(spec.WGSubnet, ".0/24", ".2/24", 1)
@@ -401,14 +488,16 @@ func decodeCreateInboundRequest(r *http.Request) (createInboundReq, error) {
 		return createInboundReq{}, err
 	}
 	return createInboundReq{
-		Tag:           strings.TrimSpace(r.PostFormValue("tag")),
-		Meeting:       strings.TrimSpace(r.PostFormValue("meeting")),
-		DisplayName:   strings.TrimSpace(r.PostFormValue("display_name")),
-		Transport:     strings.TrimSpace(r.PostFormValue("transport")),
-		VKCaptchaMode: strings.TrimSpace(r.PostFormValue("vk_captcha_mode")),
-		VKRole:        strings.TrimSpace(r.PostFormValue("vk_role")),
-		AutoProvision: parseBool(r.PostFormValue("auto_provision")),
-		WGEndpoint:    strings.TrimSpace(r.PostFormValue("wg_endpoint")),
+		Tag:              strings.TrimSpace(r.PostFormValue("tag")),
+		Meeting:          strings.TrimSpace(r.PostFormValue("meeting")),
+		DisplayName:      strings.TrimSpace(r.PostFormValue("display_name")),
+		Transport:        strings.TrimSpace(r.PostFormValue("transport")),
+		VKCaptchaMode:    strings.TrimSpace(r.PostFormValue("vk_captcha_mode")),
+		VKRole:           strings.TrimSpace(r.PostFormValue("vk_role")),
+		VKTurnListenAddr: strings.TrimSpace(r.PostFormValue("vk_turn_listen_addr")),
+		VKTurnUseWrap:    parseBool(r.PostFormValue("vk_turn_use_wrap")),
+		AutoProvision:    parseBool(r.PostFormValue("auto_provision")),
+		WGEndpoint:       strings.TrimSpace(r.PostFormValue("wg_endpoint")),
 	}, nil
 }
 
@@ -426,4 +515,151 @@ func parseBool(s string) bool {
 	default:
 		return false
 	}
+}
+
+// generateWrapKey rolls a fresh 32-byte secret for the vk-turn WRAP
+// layer and returns it as 64 hex chars. Same encoding the upstream
+// Moroka8 client expects on its `-wrap-key` flag.
+func generateWrapKey() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// generateWGPresharedKey rolls a fresh 32-byte WG PresharedKey and
+// returns it as a 44-char standard base64 string (the encoding wg(8)
+// accepts in conf files and what `wg genpsk` produces).
+func generateWGPresharedKey() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
+
+// vkTurnLinkErr typed so [errStatus] can map common failure modes to
+// useful HTTP codes (404 missing inbound, 400 wrong transport, …).
+type vkTurnLinkErr struct {
+	status int
+	msg    string
+}
+
+func (e *vkTurnLinkErr) Error() string { return e.msg }
+
+func errStatus(err error) int {
+	if e, ok := err.(*vkTurnLinkErr); ok {
+		return e.status
+	}
+	return http.StatusInternalServerError
+}
+
+// buildVKTurnLink assembles the anton48 connection link for a vk-turn
+// inbound. Centralised so both the text and QR handlers share validation.
+func (s *Server) buildVKTurnLink(id string) (string, error) {
+	spec, ok := s.opts.Manager.Get(id)
+	if !ok {
+		return "", &vkTurnLinkErr{http.StatusNotFound, "inbound not found"}
+	}
+	if spec.Transport != "vk-turn" {
+		return "", &vkTurnLinkErr{http.StatusBadRequest, "inbound is not transport=vk-turn"}
+	}
+	if spec.VKTurn == nil {
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, "spec has no VKTurn data (corrupted state)"}
+	}
+	if spec.ClientWGPrivateKey == "" || spec.ServerWGPublicKey == "" {
+		return "", &vkTurnLinkErr{http.StatusBadRequest, "no auto-provisioned WG identity — recreate inbound with AutoProvision=true"}
+	}
+	if spec.VKTurn.PresharedKey == "" {
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, "missing preshared key (auto-provision skipped it?)"}
+	}
+	if spec.VKTurn.VKLink == "" {
+		return "", &vkTurnLinkErr{http.StatusBadRequest, "VK call URL is empty — re-edit inbound"}
+	}
+
+	publicHost, err := publicHostFromHint(s.opts.PublicEndpointHint)
+	if err != nil {
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, "admin.PublicEndpointHint malformed: " + err.Error()}
+	}
+	// vk-turn listener port lives in the spec; combine with the public
+	// host from the global hint. ListenAddr typically has form
+	// "0.0.0.0:56001" — strip the bind address, keep the port.
+	port, err := portFromListenAddr(spec.VKTurn.ListenAddr)
+	if err != nil {
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, "vk_turn.listen_addr malformed: " + err.Error()}
+	}
+
+	// Tunnel address is the client side of the auto-provisioned /24
+	// (e.g. 10.66.1.2/24). We don't persist ClientIP in Spec directly,
+	// so we re-derive it from WGSubnet — host index 2 by wgprovision
+	// convention.
+	tunnelAddr, err := clientTunnelAddrFromSubnet(spec.WGSubnet)
+	if err != nil {
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, "spec.WGSubnet malformed: " + err.Error()}
+	}
+
+	link, err := vkturnpkg.BuildAnton48Link(vkturnpkg.LinkParams{
+		ClientPrivateKey: spec.ClientWGPrivateKey,
+		ServerPublicKey:  spec.ServerWGPublicKey,
+		PresharedKey:     spec.VKTurn.PresharedKey,
+		TunnelAddress:    tunnelAddr,
+		VKLink:           spec.VKTurn.VKLink,
+		PeerAddress:      net.JoinHostPort(publicHost, port),
+		UseWrap:          spec.VKTurn.UseWrap,
+		WrapKeyHex:       spec.VKTurn.WrapKeyHex,
+		DNSServers:       "8.8.8.8",
+		NumConnections:   10,
+	})
+	if err != nil {
+		return "", err
+	}
+	return link, nil
+}
+
+// publicHostFromHint extracts the host portion of PublicEndpointHint
+// (e.g. "1.2.3.4:51820" → "1.2.3.4"). Loopback hosts are rejected —
+// the resulting link would be useless from the operator's phone.
+func publicHostFromHint(hint string) (string, error) {
+	if hint == "" {
+		return "", fmt.Errorf("PublicEndpointHint is empty — set it to <vps-public-ip>:<wg-port> in goloom-wg-server.yaml")
+	}
+	host, _, err := net.SplitHostPort(hint)
+	if err != nil {
+		return "", err
+	}
+	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return "", fmt.Errorf("PublicEndpointHint host is loopback (%q) — vk-turn link would be unreachable from clients; set it to the VPS's external IP", host)
+	}
+	return host, nil
+}
+
+// portFromListenAddr returns the port part of "<host>:<port>". host
+// may be 0.0.0.0 or empty — we only need the number.
+func portFromListenAddr(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	return port, nil
+}
+
+// clientTunnelAddrFromSubnet returns "<client-ip>/<mask>" for the WG
+// subnet (e.g. "10.66.1.0/24" → "10.66.1.2/24"). wgprovision
+// convention puts the client at host index 2.
+func clientTunnelAddrFromSubnet(subnet string) (string, error) {
+	if subnet == "" {
+		return "", fmt.Errorf("Spec.WGSubnet is empty")
+	}
+	ip, ipnet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return "", err
+	}
+	_ = ip
+	mask4 := ipnet.Mask
+	ones, _ := mask4.Size()
+	clientIP := make(net.IP, 4)
+	copy(clientIP, ipnet.IP.To4())
+	clientIP[3] = 2
+	return fmt.Sprintf("%s/%d", clientIP.String(), ones), nil
 }
