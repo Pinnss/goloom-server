@@ -36,6 +36,7 @@ type LinkSettings struct {
 	WrapKeyHex     string `json:"wrapKeyHex"` // 64 hex chars; 64 zeroes when UseWrap=false (anton48 validator)
 	DNSServers     string `json:"dnsServers,omitempty"`
 	NumConnections int    `json:"numConnections,omitempty"`
+	MTU            int    `json:"mtu,omitempty"` // see defaultMTU
 }
 
 // LinkParams gathers the inputs BuildAnton48Link needs. The caller
@@ -63,11 +64,26 @@ type LinkParams struct {
 	// Optional knobs (omitted from payload when zero).
 	DNSServers     string
 	NumConnections int
+
+	// MTU for the client's WG interface. Zero → defaultMTU (1280).
+	// Rationale: vk-turn double-encapsulates (WG inside DTLS inside
+	// TURN ChannelData over UDP). Each layer adds overhead; on a 1500-
+	// byte path MTU the client's WG MTU has to drop to ~1280 to avoid
+	// IP fragmentation of the outer DTLS packets, which TURN relays
+	// don't reassemble. The upstream Moroka8 quick_link.py hard-coded
+	// 1280 for the same reason.
+	MTU int
 }
 
 // link envelope schema version. Must match anton48
 // BackupManager.supportedConfigVersion.
 const linkSchemaVersion = 1
+
+// defaultMTU is the WG-interface MTU baked into the link when caller
+// doesn't override. 1280 = path MTU 1500 − 20 (IPv4) − 8 (UDP) − ~56
+// (DTLS+TURN ChannelData framing) − 80 (WG header) ≈ 1336, rounded
+// down with safety margin. Matches upstream Moroka8 quick_link.py.
+const defaultMTU = 1280
 
 // BuildAnton48Link returns a `vkturnproxy://import?data=<base64>`
 // URL ready to share. The base64 encoding is URL-safe-no-padding
@@ -100,6 +116,11 @@ func BuildAnton48Link(p LinkParams) (string, error) {
 		wrapKey = strings.Repeat("0", 64)
 	}
 
+	mtu := p.MTU
+	if mtu == 0 {
+		mtu = defaultMTU
+	}
+
 	settings := LinkSettings{
 		PrivateKey:     p.ClientPrivateKey,
 		PeerPublicKey:  p.ServerPublicKey,
@@ -113,6 +134,7 @@ func BuildAnton48Link(p LinkParams) (string, error) {
 		WrapKeyHex:     wrapKey,
 		DNSServers:     p.DNSServers,
 		NumConnections: p.NumConnections,
+		MTU:            mtu,
 	}
 
 	envelope := struct {

@@ -335,16 +335,15 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 // что мы не дёрнем здоровое-но-тихое соединение, но всё-таки реагируем
 // быстрее, чем за 15 часов простоя как было до фикса.
 //
-// Не применим к relay-family inbound'ам: у них нет wgrelay.Bridge, и
-// RxBytes всегда нулевой — watchdog ложно сработает каждые 2 минуты и
-// будет рвать клиенту DTLS-сессию (заставляя его заново проходить VK
-// captcha). Свежесть relay-listener'а мы можем проверять отдельно через
-// Status.RelayActive когда-нибудь, но сам listener не "застревает" —
-// он просто принимает или не принимает входящие коннекшены, без
-// внутреннего состояния которое может сгнить.
+// Для relay-family inbound'ов работаем по другим счётчикам — у них
+// нет wgrelay.Bridge, RxBytes всегда нулевой. Используем дельту
+// RelayAccepted + текущий ActiveConnections: если за окно не появилось
+// ни одного нового accept'а И прямо сейчас ноль активных коннектов,
+// считаем listener'а потенциально зависшим и кикаем его. Иначе —
+// идём по обычной Bridge-логике.
 func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Runner) {
 	if isRelayTransport(r.Spec.Transport) {
-		<-ctx.Done()
+		m.watchdogRelay(ctx, cancel, r)
 		return
 	}
 	const (
@@ -388,6 +387,70 @@ func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Ru
 			if time.Since(lastChange) > rxStallTimeout {
 				m.logger.Printf("inbound %s: no rx for %s while phase=relaying — forcing reconnect",
 					r.Spec.Tag, rxStallTimeout)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// watchdogRelay — версия для transport=vk-turn (и других relay-family).
+// Считает listener'а живым пока:
+//   - есть активные коннекты (ActiveConnections > 0), ИЛИ
+//   - за окно relayStallTimeout приехал хоть один новый accept
+//     (TotalAccepted увеличился).
+//
+// Если оба условия false — listener'а либо никто не нашёл за окно,
+// либо он стал отвергать handshake'и, либо что-то сгнило между
+// accept-loop'ом и pion/dtls. Cancel'ит local ctx чтобы поднять
+// listener заново с чистого листа.
+//
+// Окно длиннее SFU-watchdog (10 мин vs 2 мин): vk-turn клиенту дорого
+// переподключаться (VK captcha = десятки секунд + риск rate-limit),
+// поэтому stale-listener не такая катастрофа как stale-bridge, и
+// порог терпимости можно поднять.
+func (m *Manager) watchdogRelay(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+	const (
+		tick               = 30 * time.Second
+		relayStallTimeout  = 10 * time.Minute
+	)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var (
+		lastAccepted uint64
+		lastChange   = time.Now()
+		wasActive    bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st := r.Status()
+			if st.Phase != "relaying" {
+				lastAccepted = 0
+				lastChange = time.Now()
+				wasActive = false
+				continue
+			}
+			if !wasActive {
+				wasActive = true
+				lastAccepted = st.RelayAccepted
+				lastChange = time.Now()
+				continue
+			}
+			// Любой из сигналов жизни сбрасывает таймер:
+			//   - новый accept за окно → клиент дошёл до DTLS handshake
+			//   - открытый коннект прямо сейчас → реальный трафик
+			if st.RelayAccepted != lastAccepted || st.RelayActive > 0 {
+				lastAccepted = st.RelayAccepted
+				lastChange = time.Now()
+				continue
+			}
+			if time.Since(lastChange) > relayStallTimeout {
+				m.logger.Printf("inbound %s: no relay activity for %s (accepted stuck at %d, active=0) — forcing reconnect",
+					r.Spec.Tag, relayStallTimeout, st.RelayAccepted)
 				cancel()
 				return
 			}
