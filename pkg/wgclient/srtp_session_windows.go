@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	"golang.zx2c4.com/wireguard/device"
 
+	"github.com/Pinnss/goloom-server/internal/identity"
 	"github.com/Pinnss/goloom-server/internal/relay/vkturnsrtp"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/internal/tun"
@@ -69,7 +70,13 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	solver := vkauth.AutoProxyCaptchaSolver(2*time.Minute, lg, nil)
 	authCtx, authCancel := context.WithTimeout(ctx, 3*time.Minute)
 	authRes, err := vkcalls.DoAuth(authCtx, lg, vkcalls.AuthSpec{
-		ShortID:  shortID,
+		ShortID: shortID,
+		// VK's getAnonymousToken requires a non-empty display name —
+		// without it the request fails with "vk error 100: name is
+		// undefined" at step 1. Generate a plausible Russian name
+		// the same way the SFU vk-calls transport does (see
+		// internal/sfu/vkcalls/transport.go).
+		Name:     identity.NameOrGenerate(cfg.DisplayName),
 		DeviceID: uuid.NewString(),
 		Solver:   solver,
 	})
