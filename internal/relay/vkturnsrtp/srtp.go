@@ -67,10 +67,83 @@ func IsDTLS(b byte) bool { return b >= 20 && b <= 63 }
 // packet (version-2 in top 2 bits → 128..191).
 func IsRTP(b byte) bool { return b >= 128 && b <= 191 }
 
-// Client/runDemuxFromPacketConn from upstream srtpwrap are not ported
-// — goloom is server-only on this transport. wrappedConn.stopDemux
-// (which the client path used) is set to nil in our Listen flow and
-// the Close path no-ops on it.
+// ─── Client ───────────────────────────────────────────────────────────────
+
+// Client performs a DTLS-SRTP handshake on top of an existing
+// PacketConn talking to remote, and returns a net.Conn whose Read/Write
+// methods carry user payload framed as RTP and encrypted as SRTP.
+//
+// underlay can be any net.PacketConn — including a TURN-relayed conn
+// returned by pion/turn's client.Allocate().
+//
+// ctx bounds the handshake only — after Client returns nil, the
+// returned conn's lifecycle is decoupled from ctx and Stop via
+// conn.Close().
+func Client(ctx context.Context, underlay net.PacketConn, remote net.Addr) (net.Conn, error) {
+	if underlay == nil {
+		return nil, errors.New("vkturnsrtp: underlay is nil")
+	}
+	if remote == nil {
+		return nil, errors.New("vkturnsrtp: remote is nil")
+	}
+
+	cert, err := selfsign.GenerateSelfSigned()
+	if err != nil {
+		return nil, fmt.Errorf("vkturnsrtp: cert gen: %w", err)
+	}
+
+	dtlsCh := make(chan []byte, 64)
+	rtpCh := make(chan []byte, 4096)
+	// Production callers cancel `ctx` immediately after Client() returns
+	// (it's a handshake-timeout ctx). To keep the demux goroutine alive
+	// past handshake, we run it under a separate context bound to the
+	// wrappedConn.Close path via stopDemux.
+	demuxCtx, demuxCancel := context.WithCancel(context.Background())
+	go runDemuxFromPacketConn(demuxCtx, underlay, dtlsCh, rtpCh)
+
+	adapter := &packetConnAdapter{
+		raw:    underlay,
+		ch:     dtlsCh,
+		addr:   remote,
+		closed: make(chan struct{}),
+	}
+
+	// pion/dtls v3.x Client/Server only set up the Conn — handshake
+	// runs lazily on first Read/Write OR via explicit HandshakeContext.
+	// We call it explicitly so we control timeout + so ConnectionState
+	// is populated when we extract SRTP keys below.
+	dconn, err := dtls.Client(adapter, remote, &dtls.Config{
+		Certificates:         []tls.Certificate{cert},
+		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		SRTPProtectionProfiles: []dtls.SRTPProtectionProfile{
+			dtls.SRTP_AES128_CM_HMAC_SHA1_80,
+		},
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		_ = adapter.Close()
+		demuxCancel()
+		return nil, fmt.Errorf("vkturnsrtp: dtls client init: %w", err)
+	}
+	hsCtx, hsCancel := context.WithTimeout(ctx, HandshakeTimeout)
+	hsErr := dconn.HandshakeContext(hsCtx)
+	hsCancel()
+	if hsErr != nil {
+		_ = dconn.Close()
+		_ = adapter.Close()
+		demuxCancel()
+		return nil, fmt.Errorf("vkturnsrtp: dtls client handshake: %w", hsErr)
+	}
+
+	wrap, err := newWrappedConn(underlay, remote, dconn, rtpCh, true /*isClient*/, demuxCancel)
+	if err != nil {
+		_ = dconn.Close()
+		_ = adapter.Close()
+		demuxCancel()
+		return nil, fmt.Errorf("vkturnsrtp: post-handshake setup: %w", err)
+	}
+	return wrap, nil
+}
 
 // ─── Server ───────────────────────────────────────────────────────────────
 
@@ -610,5 +683,60 @@ func (c *wrappedConn) setDl(t time.Time) {
 	}
 }
 
-// (Upstream runDemuxFromPacketConn dropped — server-only port.)
+// ─── client-side demux from a single-peer PacketConn ──────────────────────
+
+// runDemuxFromPacketConn reads packets from a single-peer PacketConn
+// (typically a TURN-allocated relayConn) and routes them into either
+// the DTLS or RTP channel by first-byte heuristic, mirroring the
+// server-side Server.demux loop. Used by the client adapter to share
+// the underlay socket between the DTLS handshake and the SRTP data
+// path post-handshake.
+//
+// Block on ReadFrom and use context.AfterFunc to set the deadline on
+// ctx cancellation — previous polling pattern was a CPU-wakeup-budget
+// killer on mobile (per upstream comment in anton48 iOS port).
+func runDemuxFromPacketConn(ctx context.Context, raw net.PacketConn, dtlsCh, rtpCh chan<- []byte) {
+	stop := context.AfterFunc(ctx, func() {
+		_ = raw.SetReadDeadline(time.Now())
+	})
+	defer stop()
+
+	buf := make([]byte, 2048)
+	for {
+		n, _, err := raw.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			var ne net.Error
+			if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+				_ = raw.SetReadDeadline(time.Time{})
+				continue
+			}
+			continue
+		}
+		if n == 0 {
+			continue
+		}
+		pkt := make([]byte, n)
+		copy(pkt, buf[:n])
+		switch {
+		case IsDTLS(pkt[0]):
+			select {
+			case dtlsCh <- pkt:
+			case <-ctx.Done():
+				return
+			}
+		case IsRTP(pkt[0]):
+			select {
+			case rtpCh <- pkt:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
 
