@@ -89,44 +89,76 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	}
 	lg.Printf("vk-turn-srtp: VK auth ok — %d TURN URL(s), peer_id=%s", len(authRes.TurnURLs), authRes.PeerID)
 
-	// ── 2. TURN ALLOCATE ───────────────────────────────────────────
+	// ── 2. N parallel TURN ALLOCATE + DTLS-SRTP sessions ───────────
+	// VK shapes per-allocation TURN traffic, so a single allocation
+	// caps at ~7-9 KB/s on the legacy path and ~250 KB/s on the
+	// SRTP path. Anton48 build125 ships 10 by default; we follow
+	// the same convention unless caller overrides via the link.
+	numConns := cfg.VKTurnSRTP.NumConnections
+	if numConns <= 0 {
+		numConns = 10
+	}
 	creds := turnCreds{Username: authRes.TurnUser, Password: authRes.TurnPass}
-	var alloc *turnAllocation
+
+	// Build a working list of TURN endpoints (UDP-only; turns://
+	// would need TCP/TLS via pion which we don't wire up yet).
+	turnEndpoints := make([]string, 0, len(authRes.TurnURLs))
 	for _, raw := range authRes.TurnURLs {
-		hp := parseTURNHostPort(raw)
-		if hp == "" {
-			lg.Printf("vk-turn-srtp: skipping malformed TURN URL %q", raw)
-			continue
-		}
-		// Skip turns:/stuns: variants — they need TLS-over-TCP which
-		// pion/turn supports differently. UDP-only "turn:host:port"
-		// is what we actually want for the high-throughput path.
 		if strings.HasPrefix(raw, "turns:") {
 			continue
 		}
+		if hp := parseTURNHostPort(raw); hp != "" {
+			turnEndpoints = append(turnEndpoints, hp)
+		}
+	}
+	if len(turnEndpoints) == 0 {
+		return errors.New("vk-turn-srtp: VK returned no usable TURN endpoints (all were turns:// or unparseable)")
+	}
+
+	allocs := make([]*turnAllocation, 0, numConns)
+	srtpConns := make([]net.Conn, 0, numConns)
+	cleanup := func() {
+		for _, c := range srtpConns {
+			_ = c.Close()
+		}
+		for _, a := range allocs {
+			a.Close()
+		}
+	}
+	defer func() {
+		if len(srtpConns) != numConns {
+			cleanup() // partial setup — clean up early
+		}
+	}()
+	for i := 0; i < numConns; i++ {
+		hp := turnEndpoints[i%len(turnEndpoints)] // round-robin across endpoints
 		a, allocErr := allocateTURN(ctx, hp, cfg.VKTurnSRTP.PeerAddress, creds)
 		if allocErr != nil {
-			lg.Printf("vk-turn-srtp: TURN allocate against %s failed: %v", hp, allocErr)
+			lg.Printf("vk-turn-srtp: TURN allocate %d/%d against %s failed: %v", i+1, numConns, hp, allocErr)
 			continue
 		}
-		alloc = a
-		lg.Printf("vk-turn-srtp: TURN allocation via %s — relay=%s peer=%s", hp, a.relay.LocalAddr(), a.PeerAddr())
-		break
+		hsCtx, hsCancel := context.WithTimeout(ctx, 15*time.Second)
+		conn, hsErr := vkturnsrtp.Client(hsCtx, a.Relay(), a.PeerAddr())
+		hsCancel()
+		if hsErr != nil {
+			lg.Printf("vk-turn-srtp: DTLS-SRTP handshake %d/%d failed: %v", i+1, numConns, hsErr)
+			a.Close()
+			continue
+		}
+		allocs = append(allocs, a)
+		srtpConns = append(srtpConns, conn)
+		lg.Printf("vk-turn-srtp: conn %d/%d up — TURN=%s relay=%s", i+1, numConns, hp, a.relay.LocalAddr())
 	}
-	if alloc == nil {
-		return errors.New("vk-turn-srtp: every VK TURN URL failed to allocate")
+	if len(srtpConns) == 0 {
+		return errors.New("vk-turn-srtp: every TURN allocate / DTLS handshake failed")
 	}
-	defer alloc.Close()
-
-	// ── 3. DTLS-SRTP handshake through the relay ───────────────────
-	hsCtx, hsCancel := context.WithTimeout(ctx, 15*time.Second)
-	srtpConn, err := vkturnsrtp.Client(hsCtx, alloc.Relay(), alloc.PeerAddr())
-	hsCancel()
-	if err != nil {
-		return fmt.Errorf("vk-turn-srtp: DTLS-SRTP handshake: %w", err)
+	if len(srtpConns) < numConns {
+		lg.Printf("vk-turn-srtp: only %d/%d conns survived setup — running with reduced parallelism", len(srtpConns), numConns)
 	}
-	defer srtpConn.Close()
-	lg.Printf("vk-turn-srtp: DTLS-SRTP handshake ok")
+	// All-or-cleanup is no longer required; mark setup complete by
+	// resizing numConns to the successful subset so the deferred
+	// cleanup check passes.
+	numConns = len(srtpConns)
 
 	// ── 4. Wintun + wireguard-go bound to the SRTP conn ─────────────
 	dns := cfg.WG.DNS
@@ -148,7 +180,7 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		}
 	}()
 
-	bind := newSRTPBind(srtpConn)
+	bind := newSRTPBind(srtpConns)
 	wgLogger := &device.Logger{
 		Verbosef: func(format string, args ...any) { lg.Printf("WG-USERSPACE: "+format, args...) },
 		Errorf:   func(format string, args ...any) { lg.Printf("WARN WG-USERSPACE: "+format, args...) },
