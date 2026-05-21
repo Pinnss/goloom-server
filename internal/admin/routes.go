@@ -578,9 +578,9 @@ func (s *Server) buildVKTurnLink(id string) (string, error) {
 		return "", &vkTurnLinkErr{http.StatusBadRequest, "VK call URL is empty — re-edit inbound"}
 	}
 
-	publicHost, err := publicHostFromHint(s.opts.PublicEndpointHint)
+	publicHost, err := s.publicHostForLink()
 	if err != nil {
-		return "", &vkTurnLinkErr{http.StatusInternalServerError, "admin.PublicEndpointHint malformed: " + err.Error()}
+		return "", &vkTurnLinkErr{http.StatusInternalServerError, err.Error()}
 	}
 	// vk-turn listener port lives in the spec; combine with the public
 	// host from the global hint. ListenAddr typically has form
@@ -617,21 +617,64 @@ func (s *Server) buildVKTurnLink(id string) (string, error) {
 	return link, nil
 }
 
-// publicHostFromHint extracts the host portion of PublicEndpointHint
-// (e.g. "1.2.3.4:51820" → "1.2.3.4"). Loopback hosts are rejected —
-// the resulting link would be useless from the operator's phone.
-func publicHostFromHint(hint string) (string, error) {
-	if hint == "" {
-		return "", fmt.Errorf("PublicEndpointHint is empty — set it to <vps-public-ip>:<wg-port> in goloom-wg-server.yaml")
+// publicHostForLink picks the externally-reachable host for vk-turn
+// client links. Tries PublicEndpointHint first (best — it's the field
+// operators set explicitly when running multi-homed deployments) and
+// falls back to the host of PublicURL (which every operator has to
+// set for the admin UI itself to work). Loopback values are rejected
+// — the resulting link would be useless from a phone.
+func (s *Server) publicHostForLink() (string, error) {
+	if h := nonLoopbackHostFromHostPort(s.opts.PublicEndpointHint); h != "" {
+		return h, nil
 	}
-	host, _, err := net.SplitHostPort(hint)
+	if h := nonLoopbackHostFromURL(s.opts.PublicURL); h != "" {
+		return h, nil
+	}
+	return "", fmt.Errorf("can't derive a public host for the vk-turn link: PublicEndpointHint=%q PublicURL=%q (both loopback or empty — set one to the VPS's external IP)", s.opts.PublicEndpointHint, s.opts.PublicURL)
+}
+
+func nonLoopbackHostFromHostPort(hp string) string {
+	if hp == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(hp)
 	if err != nil {
-		return "", err
+		return ""
 	}
-	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
-		return "", fmt.Errorf("PublicEndpointHint host is loopback (%q) — vk-turn link would be unreachable from clients; set it to the VPS's external IP", host)
+	if isLoopbackHost(host) {
+		return ""
 	}
-	return host, nil
+	return host
+}
+
+func nonLoopbackHostFromURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	// Strip "scheme://" — net.SplitHostPort works on host:port pairs.
+	rest := rawURL
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	// rest is now "host[:port]"; SplitHostPort handles both.
+	host := rest
+	if strings.Contains(rest, ":") {
+		h, _, err := net.SplitHostPort(rest)
+		if err == nil {
+			host = h
+		}
+	}
+	if isLoopbackHost(host) {
+		return ""
+	}
+	return host
+}
+
+func isLoopbackHost(host string) bool {
+	return host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 // portFromListenAddr returns the port part of "<host>:<port>". host
