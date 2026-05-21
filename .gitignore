@@ -64,3 +64,8 @@ keystore.properties
 # Local wintun.dll downloaded by dl_wintun.go — per-developer artifact.
 /wintun.dll
 /goloom-wg-client*.yaml
+
+# .aar produced by mobile/scripts/build-android.sh — shipped via
+# GitHub Releases, not via git.
+/goloom.aar
+/build/android/
