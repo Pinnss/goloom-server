@@ -233,11 +233,11 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// vk-turn clients (anton48/Moroka8) require a non-empty
-		// PresharedKey in the wg config — generate one and bake it
-		// into both the wg-quick peer section (server side) and the
-		// Spec so the connection-link generator can surface it.
-		if spec.Transport == "vk-turn" {
+		// vk-turn / vk-turn-srtp clients (anton48/Moroka8) require a
+		// non-empty PresharedKey in the wg config — generate one and
+		// bake it into both the wg-quick peer section (server side)
+		// and the Spec so the connection-link generator can surface it.
+		if spec.Transport == "vk-turn" || spec.Transport == "vk-turn-srtp" {
 			psk, err := generateWGPresharedKey()
 			if err != nil {
 				http.Error(w, "preshared-key gen: "+err.Error(), http.StatusInternalServerError)
