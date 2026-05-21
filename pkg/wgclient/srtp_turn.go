@@ -34,9 +34,9 @@ import (
 	"github.com/pion/turn/v5"
 )
 
-// turnAllocation owns the underlying TURN client + the UDP conn it
+// TURNAllocation owns the underlying TURN client + the UDP conn it
 // runs over. Closing it tears both down in the right order.
-type turnAllocation struct {
+type TURNAllocation struct {
 	client    *turn.Client
 	relay     net.PacketConn
 	udpConn   *net.UDPConn
@@ -46,14 +46,14 @@ type turnAllocation struct {
 
 // PeerAddr is the resolved goloom-server address that wrapped
 // senders should target via relay.WriteTo.
-func (a *turnAllocation) PeerAddr() *net.UDPAddr { return a.peerAddr }
+func (a *TURNAllocation) PeerAddr() *net.UDPAddr { return a.peerAddr }
 
 // Relay is the TURN-relayed net.PacketConn. Reads return packets
 // already de-framed (no ChannelData header); writes need a
 // destination addr — typically [PeerAddr] for the production path.
-func (a *turnAllocation) Relay() net.PacketConn { return a.relay }
+func (a *TURNAllocation) Relay() net.PacketConn { return a.relay }
 
-func (a *turnAllocation) Close() {
+func (a *TURNAllocation) Close() {
 	a.closeOnce.Do(func() {
 		if a.relay != nil {
 			_ = a.relay.Close()
@@ -67,21 +67,21 @@ func (a *turnAllocation) Close() {
 	})
 }
 
-// turnCreds is the long-term auth bundle returned by VK's
+// TURNCreds is the long-term auth bundle returned by VK's
 // calls.getAnonymousToken + joinConversationByLink chain.
-type turnCreds struct {
+type TURNCreds struct {
 	Username string
 	Password string
 }
 
-// allocateTURN dials turnAddr (UDP), runs the TURN ALLOCATE handshake
+// AllocateTURN dials turnAddr (UDP), runs the TURN ALLOCATE handshake
 // using creds, and returns a handle whose Relay() can be wrapped by
 // vkturnsrtp.Client. peerAddrStr is resolved up front so wrappers
 // downstream don't have to.
 //
 // ctx bounds the dial + handshake setup; once the returned handle
 // is in hand, its lifetime is decoupled from ctx (call Close()).
-func allocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds turnCreds) (*turnAllocation, error) {
+func AllocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds TURNCreds) (*TURNAllocation, error) {
 	turnUDP, err := net.ResolveUDPAddr("udp", turnAddr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve TURN %s: %w", turnAddr, err)
@@ -151,7 +151,7 @@ func allocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds turnC
 		_, _ = relayConn.WriteTo([]byte{0}, peerUDP)
 	}
 
-	return &turnAllocation{
+	return &TURNAllocation{
 		client:   client,
 		relay:    relayConn,
 		udpConn:  udpConn,

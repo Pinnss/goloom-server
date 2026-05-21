@@ -11,7 +11,7 @@
 //   3. DTLS-SRTP handshake through the TURN relay to the goloom
 //      server's vk-turn-srtp listener (peerAddress from the link).
 //   4. Wintun TUN device + wireguard-go userspace, bound to a
-//      [srtpBind] that pipes WG packets through the SRTP wrapped
+//      [SRTPBind] that pipes WG packets through the SRTP wrapped
 //      conn instead of a real UDP socket.
 //   5. Default-route the box through the new TUN, idle until ctx
 //      cancellation, tear everything down.
@@ -98,7 +98,7 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	if numConns <= 0 {
 		numConns = 10
 	}
-	creds := turnCreds{Username: authRes.TurnUser, Password: authRes.TurnPass}
+	creds := TURNCreds{Username: authRes.TurnUser, Password: authRes.TurnPass}
 
 	// Build a working list of TURN endpoints (UDP-only; turns://
 	// would need TCP/TLS via pion which we don't wire up yet).
@@ -115,7 +115,7 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		return errors.New("vk-turn-srtp: VK returned no usable TURN endpoints (all were turns:// or unparseable)")
 	}
 
-	allocs := make([]*turnAllocation, 0, numConns)
+	allocs := make([]*TURNAllocation, 0, numConns)
 	srtpConns := make([]net.Conn, 0, numConns)
 	cleanup := func() {
 		for _, c := range srtpConns {
@@ -132,7 +132,7 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	}()
 	for i := 0; i < numConns; i++ {
 		hp := turnEndpoints[i%len(turnEndpoints)] // round-robin across endpoints
-		a, allocErr := allocateTURN(ctx, hp, cfg.VKTurnSRTP.PeerAddress, creds)
+		a, allocErr := AllocateTURN(ctx, hp, cfg.VKTurnSRTP.PeerAddress, creds)
 		if allocErr != nil {
 			lg.Printf("vk-turn-srtp: TURN allocate %d/%d against %s failed: %v", i+1, numConns, hp, allocErr)
 			continue
@@ -180,7 +180,7 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		}
 	}()
 
-	bind := newSRTPBind(srtpConns)
+	bind := NewSRTPBind(srtpConns)
 	wgLogger := &device.Logger{
 		Verbosef: func(format string, args ...any) { lg.Printf("WG-USERSPACE: "+format, args...) },
 		Errorf:   func(format string, args ...any) { lg.Printf("WARN WG-USERSPACE: "+format, args...) },

@@ -27,8 +27,8 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 )
 
-// srtpBind implements [conn.Bind] over one-or-many SRTP-wrapped conns.
-type srtpBind struct {
+// SRTPBind implements [conn.Bind] over one-or-many SRTP-wrapped conns.
+type SRTPBind struct {
 	mu     sync.Mutex
 	open   bool
 	closed chan struct{}
@@ -52,28 +52,28 @@ type rxPacket struct {
 
 const srtpBindRxBufSize = 256
 
-// newSRTPBind takes ownership of conns — Close() will close them all.
+// NewSRTPBind takes ownership of conns — Close() will close them all.
 // Empty or nil slice is a programmer error.
-func newSRTPBind(conns []net.Conn) *srtpBind {
+func NewSRTPBind(conns []net.Conn) *SRTPBind {
 	if len(conns) == 0 {
 		// Make Bind methods safely return errors instead of panicking.
 		conns = nil
 	}
-	return &srtpBind{
+	return &SRTPBind{
 		conns:  conns,
 		closed: make(chan struct{}),
 		rxCh:   make(chan rxPacket, srtpBindRxBufSize),
 	}
 }
 
-func (b *srtpBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
+func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.open {
-		return nil, 0, errors.New("srtpBind: already open")
+		return nil, 0, errors.New("SRTPBind: already open")
 	}
 	if len(b.conns) == 0 {
-		return nil, 0, errors.New("srtpBind: no SRTP conns")
+		return nil, 0, errors.New("SRTPBind: no SRTP conns")
 	}
 	b.open = true
 
@@ -109,7 +109,7 @@ func (b *srtpBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 // readerLoop pulls packets off one SRTP conn and pushes them into the
 // shared fan-in channel. Exits when the conn closes (Read returns
 // non-nil error) or the bind closes (rxCh push selected closed).
-func (b *srtpBind) readerLoop(c net.Conn) {
+func (b *SRTPBind) readerLoop(c net.Conn) {
 	defer b.rxWG.Done()
 	buf := make([]byte, 2048)
 	for {
@@ -128,7 +128,7 @@ func (b *srtpBind) readerLoop(c net.Conn) {
 	}
 }
 
-func (b *srtpBind) Close() error {
+func (b *SRTPBind) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.open {
@@ -151,14 +151,14 @@ func (b *srtpBind) Close() error {
 	return firstErr
 }
 
-func (b *srtpBind) SetMark(uint32) error { return nil }
+func (b *SRTPBind) SetMark(uint32) error { return nil }
 
 // Send writes each buf through one of the conns, round-robining
 // across the pool. A per-conn write error is non-fatal at the bind
 // level — WG handshake retry will retry through whichever conns
 // are still alive. We do propagate the error to WG so it can
 // schedule that retry. The next Send picks a different conn.
-func (b *srtpBind) Send(bufs [][]byte, _ conn.Endpoint) error {
+func (b *SRTPBind) Send(bufs [][]byte, _ conn.Endpoint) error {
 	if len(b.conns) == 0 {
 		return net.ErrClosed
 	}
@@ -172,11 +172,11 @@ func (b *srtpBind) Send(bufs [][]byte, _ conn.Endpoint) error {
 	return nil
 }
 
-func (b *srtpBind) ParseEndpoint(string) (conn.Endpoint, error) {
+func (b *SRTPBind) ParseEndpoint(string) (conn.Endpoint, error) {
 	return srtpEndpoint{}, nil
 }
 
-func (b *srtpBind) BatchSize() int { return 1 }
+func (b *SRTPBind) BatchSize() int { return 1 }
 
 type srtpEndpoint struct{}
 
