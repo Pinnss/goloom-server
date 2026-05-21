@@ -32,11 +32,28 @@ import (
 type Kind string
 
 const (
-	// KindVKTurn — VK TURN proxy server (see
+	// KindVKTurn — legacy VK TURN proxy server (see
 	// [github.com/Pinnss/goloom-server/internal/relay/vkturn]).
 	// Binds UDP, terminates DTLS (optionally wrapped with ChaCha20-XOR
 	// obfuscation), and forwards plaintext payload to a local WG endpoint.
+	//
+	// VK started shape-policing DTLS+WG signatures around 2026-05; per
+	// allocation throughput on this path collapsed to ~7-9 KB/s. Keep
+	// for back-compat, prefer KindVKTurnSRTP for new inbounds.
 	KindVKTurn Kind = "vk-turn"
+
+	// KindVKTurnSRTP — SRTP-framed VK TURN proxy server (see
+	// [github.com/Pinnss/goloom-server/internal/relay/vkturnsrtp]).
+	// Wraps each WG packet as an RTP record then SRTP-encrypts it so
+	// the VK TURN-relay content classifier sees what looks like
+	// WebRTC media. Bypasses VK's per-allocation shape policy —
+	// empirical ~30-40 Mbps sustained vs ~2 Mbps on the legacy
+	// DTLS+WG path (anton48/vk-turn-proxy build125 soak test, 2026-05-20).
+	//
+	// Wire-compatible with anton48/vk-turn-proxy add-server-srtp-layer
+	// branch — same DTLS-SRTP handshake, same SRTP_AES128_CM_HMAC_SHA1_80
+	// protection profile, same PayloadType=100 RTP framing.
+	KindVKTurnSRTP Kind = "vk-turn-srtp"
 )
 
 // Config is per-instance start params for [Relay.Start]. Concrete

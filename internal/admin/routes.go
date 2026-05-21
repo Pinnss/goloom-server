@@ -204,6 +204,19 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			spec.VKTurn.WrapKeyHex = key
 		}
+	case "vk-turn-srtp":
+		// Re-uses VKTurnSpec for ListenAddr / VKLink / PresharedKey.
+		// WRAP fields stay zero — SRTP supersedes WRAP on the anton48
+		// build125+ client side, you don't run both at once.
+		spec.Transport = "vk-turn-srtp"
+		if req.VKTurnListenAddr == "" {
+			http.Error(w, "vk_turn_listen_addr is required for vk-turn-srtp transport", http.StatusBadRequest)
+			return
+		}
+		spec.VKTurn = &inbound.VKTurnSpec{
+			ListenAddr: req.VKTurnListenAddr,
+			VKLink:     req.Meeting,
+		}
 	default:
 		http.Error(w, "unknown transport: "+req.Transport, http.StatusBadRequest)
 		return
@@ -556,14 +569,15 @@ func errStatus(err error) int {
 }
 
 // buildVKTurnLink assembles the anton48 connection link for a vk-turn
-// inbound. Centralised so both the text and QR handlers share validation.
+// or vk-turn-srtp inbound. Centralised so both the text and QR
+// handlers share validation.
 func (s *Server) buildVKTurnLink(id string) (string, error) {
 	spec, ok := s.opts.Manager.Get(id)
 	if !ok {
 		return "", &vkTurnLinkErr{http.StatusNotFound, "inbound not found"}
 	}
-	if spec.Transport != "vk-turn" {
-		return "", &vkTurnLinkErr{http.StatusBadRequest, "inbound is not transport=vk-turn"}
+	if spec.Transport != "vk-turn" && spec.Transport != "vk-turn-srtp" {
+		return "", &vkTurnLinkErr{http.StatusBadRequest, "inbound transport is not in the vk-turn family"}
 	}
 	if spec.VKTurn == nil {
 		return "", &vkTurnLinkErr{http.StatusInternalServerError, "spec has no VKTurn data (corrupted state)"}
@@ -608,6 +622,7 @@ func (s *Server) buildVKTurnLink(id string) (string, error) {
 		PeerAddress:      net.JoinHostPort(publicHost, port),
 		UseWrap:          spec.VKTurn.UseWrap,
 		WrapKeyHex:       spec.VKTurn.WrapKeyHex,
+		UseSrtp:          spec.Transport == "vk-turn-srtp",
 		DNSServers:       "8.8.8.8",
 		NumConnections:   10,
 	})

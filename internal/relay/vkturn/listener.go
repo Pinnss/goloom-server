@@ -234,7 +234,7 @@ func (l *listener) forwardUDP(conn net.Conn) {
 		l.log.Printf("vkturn: %s: %v", stage, err)
 	}
 
-	// dtls → backend
+	// dtls → backend (with probe-echo gate)
 	go func() {
 		defer wg.Done()
 		defer sessCancel()
@@ -253,6 +253,27 @@ func (l *listener) forwardUDP(conn net.Conn) {
 			if err != nil {
 				logIOErr("dtls read", err)
 				return
+			}
+			// Probe-echo: anton48 client sends a 12-byte sentinel
+			// (0xff 'P' 'N' 'G' + 8-byte BE seq) periodically per
+			// conn to detect zombie sessions after iOS wake-up. We
+			// echo it back through the DTLS conn instead of
+			// forwarding to local WG (which would drop it as an
+			// invalid WG message type and never light up the
+			// client's serverProbeable flag). Wire format mirrors
+			// the anton48 add-server-srtp-layer pumpBidirectional
+			// + the cherry-picked WRAP-layer probe-echo (commit
+			// ccea0d4 on upstream wrap branch).
+			if isProbePacket(buf[:n]) {
+				if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					logIOErr("set dtls probe-echo deadline", err)
+					return
+				}
+				if _, err := conn.Write(buf[:n]); err != nil {
+					logIOErr("dtls probe-echo write", err)
+					return
+				}
+				continue
 			}
 			if err := serverConn.SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil {
 				logIOErr("set backend write deadline", err)
@@ -343,6 +364,15 @@ func (l *listener) recordErr(err error) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// isProbePacket reports whether the payload is a client liveness probe
+// (12-byte sentinel `0xff 'P' 'N' 'G' + 8-byte BE seq`). Leading 4
+// bytes are sufficient to recognise it; the seq bytes that follow
+// are echoed verbatim so the client can correlate. Mirrors
+// anton48/vk-turn-proxy server pumpBidirectional probe-echo gate.
+func isProbePacket(p []byte) bool {
+	return len(p) >= 4 && p[0] == 0xff && p[1] == 'P' && p[2] == 'N' && p[3] == 'G'
+}
 
 // isExpectedShutdownErr returns true when the error came from a
 // SetDeadline(now)-poke we initiated to wake a blocked Read/Write
