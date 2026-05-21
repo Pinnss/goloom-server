@@ -142,6 +142,37 @@ type Config struct {
 	// classic flow still works without these because the user's own
 	// WG client knows the keys via the wg.conf they downloaded.
 	WG WGParams `json:"wg"`
+
+	// VKTurnSRTP carries the relay-family knobs that arrive in a
+	// vkturnproxy:// link. Honoured only when Transport=="vk-turn-srtp"
+	// (or "vk-turn" for the legacy path); ignored otherwise.
+	VKTurnSRTP VKTurnSRTPParams `json:"vk_turn_srtp,omitzero"`
+}
+
+// VKTurnSRTPParams is the per-session knob set for the vk-turn /
+// vk-turn-srtp client paths. Populated from a vkturnproxy:// link
+// or set manually by an operator running the CLI client.
+type VKTurnSRTPParams struct {
+	// PeerAddress — goloom server's vk-turn(-srtp) listener
+	// (e.g. "vps.example.com:56001"). Required.
+	PeerAddress string `json:"peer_address"`
+
+	// UseWrap (legacy vk-turn only): toggle the ChaCha20-XOR
+	// obfuscation layer. Ignored when Transport=="vk-turn-srtp".
+	UseWrap bool `json:"use_wrap,omitempty"`
+
+	// WrapKeyHex (legacy vk-turn only): 64-hex-char shared key for
+	// the WRAP layer. Required when UseWrap is true; otherwise unused.
+	WrapKeyHex string `json:"wrap_key_hex,omitempty"`
+
+	// NumConnections — parallel TURN allocations to keep open. Anton48
+	// defaults to 10; effective per-allocation throughput stays at the
+	// VK-shaped cap (~9 KB/s on legacy DTLS+WG, much higher on SRTP).
+	// Zero falls back to the implementation default.
+	NumConnections int `json:"num_connections,omitempty"`
+
+	// MTU for the WG interface. Zero → impl default (1280 for SRTP).
+	MTU int `json:"mtu,omitempty"`
 }
 
 // WGParams is the embedded WireGuard config for the auto-WG path.
@@ -152,6 +183,11 @@ type WGParams struct {
 	ClientAddr       string   `json:"client_addr"`        // CIDR like 10.66.1.2/24
 	Endpoint         string   `json:"endpoint"`           // typically same as ListenAddr
 	DNS              []string `json:"dns,omitempty"`      // ["1.1.1.1","8.8.8.8"]
+
+	// PresharedKey — optional 32-byte base64 WG PSK. Set when the
+	// server side has a PSK on its peer (vk-turn / vk-turn-srtp
+	// inbounds always do; classic Telemost / VK Calls don't).
+	PresharedKey string `json:"preshared_key,omitempty"`
 }
 
 // Valid reports whether enough fields are populated to bring up an
@@ -237,6 +273,23 @@ func (c *Config) Validate() error {
 		if c.VKCallsRole != "" && c.VKCallsRole != "caller" && c.VKCallsRole != "receiver" {
 			return fmt.Errorf("vk_calls_role must be \"caller\" or \"receiver\" (got %q)", c.VKCallsRole)
 		}
+	case "vk-turn", "vk-turn-srtp":
+		if c.VKTurnSRTP.PeerAddress == "" {
+			return errors.New("vk_turn_srtp.peer_address required (server's vk-turn(-srtp) listener host:port)")
+		}
+		if _, _, err := net.SplitHostPort(c.VKTurnSRTP.PeerAddress); err != nil {
+			return fmt.Errorf("vk_turn_srtp.peer_address %q: %w", c.VKTurnSRTP.PeerAddress, err)
+		}
+		if !c.WG.Valid() {
+			return errors.New("transport=" + c.Transport + " requires WG client identity (private key + server pubkey + tunnel address)")
+		}
+		if c.Transport == "vk-turn" && c.VKTurnSRTP.UseWrap && len(c.VKTurnSRTP.WrapKeyHex) != 64 {
+			return fmt.Errorf("vk_turn_srtp.wrap_key_hex must be 64 hex chars when UseWrap=true (got %d)", len(c.VKTurnSRTP.WrapKeyHex))
+		}
+		// Meeting (VKLink) is optional for the SRTP path — server
+		// doesn't use it; client uses it only to bootstrap TURN
+		// credentials. Empty triggers a connect-time hint that
+		// operator needs to paste a working VK call URL.
 	default:
 		return fmt.Errorf("unknown transport %q", c.Transport)
 	}
