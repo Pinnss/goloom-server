@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -218,6 +219,21 @@ func (l *listener) forwardUDP(conn net.Conn) {
 		_ = serverConn.SetDeadline(time.Now())
 	})
 
+	// logIOErr suppresses log spam from expected shutdown errors: once
+	// sessCtx fires (peer closed DTLS, or our Close()), the AfterFunc
+	// above forces SetDeadline(time.Now()) on both ends, so the still-
+	// blocked Read/Write returns immediately with an i/o-timeout —
+	// that's the shutdown handshake, not a problem. Same goes for the
+	// peer's natural EOF on DTLS read. Both used to flood the log with
+	// 4 messages per disconnect; now they're silent if ctx is already
+	// cancelled.
+	logIOErr := func(stage string, err error) {
+		if isExpectedShutdownErr(sessCtx, err) {
+			return
+		}
+		l.log.Printf("vkturn: %s: %v", stage, err)
+	}
+
 	// dtls → backend
 	go func() {
 		defer wg.Done()
@@ -230,22 +246,22 @@ func (l *listener) forwardUDP(conn net.Conn) {
 			default:
 			}
 			if err := conn.SetReadDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				l.log.Printf("vkturn: set dtls read deadline: %v", err)
+				logIOErr("set dtls read deadline", err)
 				return
 			}
 			n, err := conn.Read(buf)
 			if err != nil {
-				l.log.Printf("vkturn: dtls read: %v", err)
+				logIOErr("dtls read", err)
 				return
 			}
 			if err := serverConn.SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				l.log.Printf("vkturn: set backend write deadline: %v", err)
+				logIOErr("set backend write deadline", err)
 				return
 			}
 			written, err := serverConn.Write(buf[:n])
 			stats.addTx(written)
 			if err != nil {
-				l.log.Printf("vkturn: backend write: %v", err)
+				logIOErr("backend write", err)
 				return
 			}
 		}
@@ -262,22 +278,22 @@ func (l *listener) forwardUDP(conn net.Conn) {
 			default:
 			}
 			if err := serverConn.SetReadDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				l.log.Printf("vkturn: set backend read deadline: %v", err)
+				logIOErr("set backend read deadline", err)
 				return
 			}
 			n, err := serverConn.Read(buf)
 			if err != nil {
-				l.log.Printf("vkturn: backend read: %v", err)
+				logIOErr("backend read", err)
 				return
 			}
 			if err := conn.SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				l.log.Printf("vkturn: set dtls write deadline: %v", err)
+				logIOErr("set dtls write deadline", err)
 				return
 			}
 			written, err := conn.Write(buf[:n])
 			stats.addRx(written)
 			if err != nil {
-				l.log.Printf("vkturn: dtls write: %v", err)
+				logIOErr("dtls write", err)
 				return
 			}
 		}
@@ -327,3 +343,35 @@ func (l *listener) recordErr(err error) {
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// isExpectedShutdownErr returns true when the error came from a
+// SetDeadline(now)-poke we initiated to wake a blocked Read/Write
+// during teardown, or from the peer naturally closing the DTLS
+// connection. In both cases logging is just noise — the per-session
+// goroutine is exiting on purpose.
+//
+// Heuristics:
+//   - if sessCtx is already cancelled, any Read/Write error is by
+//     definition part of the cancellation handshake
+//   - io.EOF on DTLS Read = clean peer disconnect, never an error
+//   - net.Error with Timeout()==true = our SetDeadline(time.Now())
+//     fired (we use 30-minute idle deadlines elsewhere, so a real
+//     timeout would mean a 30-min stall — not a shutdown)
+//   - context.DeadlineExceeded / context.Canceled = pion/dtls
+//     surfacing the wrapped sessCtx state
+func isExpectedShutdownErr(sessCtx context.Context, err error) bool {
+	if err == nil {
+		return true
+	}
+	if sessCtx.Err() != nil {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
