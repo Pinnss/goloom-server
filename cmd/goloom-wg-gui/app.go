@@ -133,7 +133,7 @@ func (a *App) fanOutEvents() {
 // wrapper around ImportProfile + ConnectProfile that does NOT save
 // — useful for one-shot debug runs without polluting the store.
 func (a *App) Connect(connstr string) (wgclient.Config, error) {
-	cfg, err := wgclient.FromConnStr(connstr)
+	cfg, err := wgclient.FromAnyLink(connstr)
 	if err != nil {
 		return wgclient.Config{}, fmt.Errorf("decode connstr: %w", err)
 	}
@@ -219,7 +219,7 @@ func (a *App) ImportProfile(connstr, name string, autoWG bool) (Profile, error) 
 	if a.profiles == nil {
 		return Profile{}, errors.New("profile store unavailable")
 	}
-	cfg, err := wgclient.FromConnStr(connstr)
+	cfg, err := wgclient.FromAnyLink(connstr)
 	if err != nil {
 		return Profile{}, fmt.Errorf("decode connstr: %w", err)
 	}

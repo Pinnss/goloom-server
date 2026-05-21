@@ -488,6 +488,40 @@ func (s *Service) supervise(ctx context.Context, cfg Config) {
 	}
 	defer rm.Restore()
 
+	// vk-turn-srtp path: dispatch to the relay-family runner instead
+	// of the SFU code below. ResolveSFUIPs for VK auth hosts is still
+	// useful (TURN ALLOCATE happens against those before WG hijacks
+	// the default route).
+	if cfg.Transport == "vk-turn-srtp" {
+		if ips, err := vkcalls.ResolveSFUIPs(); err == nil {
+			lg.Printf("VK TURN-SRTP: exclude VK auth IPs from default route: %v", ips)
+			_ = rm.ExcludeIPs(ips)
+		} else {
+			lg.Printf("WARN VK TURN-SRTP: resolve VK auth IPs: %v", err)
+		}
+		s.setStatus(func(st *Status) { st.Phase = PhaseConnecting })
+		for {
+			err := runVKTurnSRTPSession(ctx, lg, cfg, rm)
+			if ctx.Err() != nil {
+				return
+			}
+			s.setStatus(func(st *Status) {
+				st.Phase = PhaseReconnecting
+				if err != nil {
+					st.LastError = err.Error()
+				}
+			})
+			if err != nil {
+				lg.Printf("vk-turn-srtp: session ended: %v — retrying in 5s", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+
 	// Pre-resolve well-known SFU IPs to exclude from default route.
 	// LiveKit dynamic hosts are added inside run() once we have a session.
 	switch sfu.Kind(cfg.Transport) {

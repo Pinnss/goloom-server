@@ -52,6 +52,17 @@ func IsVKTurnProxyLink(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), vkTurnProxyLinkPrefix)
 }
 
+// FromAnyLink dispatches between goloom:// (via [FromConnStr]) and
+// vkturnproxy:// (via [FromVKTurnProxyLink]) by inspecting the
+// prefix. Used by the CLI / GUI entry points so the operator can
+// paste either form into the same input.
+func FromAnyLink(s string) (Config, error) {
+	if IsVKTurnProxyLink(s) {
+		return FromVKTurnProxyLink(s)
+	}
+	return FromConnStr(s)
+}
+
 // FromVKTurnProxyLink decodes a vkturnproxy://import?data=<base64> URL
 // into a wgclient.Config. Sets Transport to "vk-turn-srtp" when the
 // payload's useSrtp is true; otherwise "vk-turn" (the legacy DTLS+WG

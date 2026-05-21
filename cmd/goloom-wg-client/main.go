@@ -84,7 +84,7 @@ func main() {
 func loadConfig(connectStr, configPath string, lg *log.Logger) (wgclient.Config, error) {
 	switch {
 	case connectStr != "":
-		return wgclient.FromConnStr(connectStr)
+		return wgclient.FromAnyLink(connectStr)
 	case configPath != "":
 		return loadYAMLConfig(configPath)
 	default:
