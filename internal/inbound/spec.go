@@ -33,6 +33,11 @@ type Spec struct {
 	// otherwise.
 	VKCalls *VKCallsSpec `yaml:"vk_calls,omitempty" json:"vk_calls,omitempty"`
 
+	// VKTurn holds extra knobs for transport=vk-turn. Ignored
+	// otherwise. This transport is a listener (not an SFU client) —
+	// see [github.com/Pinnss/goloom-server/internal/relay/vkturn].
+	VKTurn *VKTurnSpec `yaml:"vk_turn,omitempty" json:"vk_turn,omitempty"`
+
 	// WGEndpoint is the local UDP address the relay forwards decrypted
 	// tunnel frames to (typically 127.0.0.1:51820 for wg0, +1 for wg1, etc.).
 	WGEndpoint string `yaml:"wg_endpoint" json:"wg_endpoint"`
@@ -132,6 +137,44 @@ type VKCallsSpec struct {
 	Codec string `yaml:"codec,omitempty" json:"codec,omitempty"`
 }
 
+// VKTurnSpec persists the VK TURN relay-specific knobs for one inbound.
+//
+// Unlike SFU transports, this is purely server-side: the relay listens
+// on ListenAddr and forwards decrypted UDP payload to Spec.WGEndpoint.
+// VKLink is not consumed by the server — it's stored only so the admin
+// panel can render an end-user connection link/QR for third-party
+// clients (anton48/Moroka8) that still need a VK call URL to anchor
+// their TURN credential request.
+type VKTurnSpec struct {
+	// ListenAddr — public UDP endpoint the relay binds, e.g.
+	// "0.0.0.0:56001". Must be unique across vk-turn inbounds on the
+	// same host (otherwise the second Start fails with EADDRINUSE).
+	ListenAddr string `yaml:"listen_addr" json:"listen_addr"`
+
+	// VKLink — VK call URL the client side references when registering
+	// VK TURN credentials via captcha (https://vk.com/call/join/<id>).
+	// Not used by the listener itself — surfaced in the admin's client
+	// connection-link generator only.
+	VKLink string `yaml:"vk_link,omitempty" json:"vk_link,omitempty"`
+
+	// UseWrap toggles the ChaCha20-XOR obfuscation layer (symmetric to
+	// the client's `-wrap` flag). When true, WrapKeyHex must be 64 hex
+	// characters (32 bytes).
+	UseWrap bool `yaml:"use_wrap,omitempty" json:"use_wrap,omitempty"`
+
+	// WrapKeyHex — 64-char hex-encoded 32-byte shared key for WRAP.
+	// Auto-rolled at create-time by the admin form when UseWrap is on.
+	WrapKeyHex string `yaml:"wrap_key_hex,omitempty" json:"-"`
+
+	// PresharedKey — 32-byte base64 WG preshared key that the
+	// auto-provisioned WG interface uses for this inbound's peer.
+	// anton48 / Moroka8 client validates that the connection-link
+	// includes a non-empty presharedKey, so vk-turn inbounds always
+	// generate one. Server side bakes it into the peer section of
+	// /etc/wireguard/<iface>.conf via wgprovision.
+	PresharedKey string `yaml:"preshared_key,omitempty" json:"-"`
+}
+
 // Status is the live snapshot the admin panel renders. Not persisted.
 type Status struct {
 	ID         string    `json:"id"`
@@ -149,4 +192,11 @@ type Status struct {
 	TxBytes   uint64 `json:"tx_bytes"`
 	RxPackets uint64 `json:"rx_packets"`
 	RxBytes   uint64 `json:"rx_bytes"`
+
+	// Relay-specific counters — non-zero only when Spec.Transport
+	// addresses the [github.com/Pinnss/goloom-server/internal/relay]
+	// family (currently just vk-turn). SFU transports leave these at 0.
+	RelayActive   uint64 `json:"relay_active,omitempty"`
+	RelayAccepted uint64 `json:"relay_accepted,omitempty"`
+	RelayListen   string `json:"relay_listen,omitempty"`
 }

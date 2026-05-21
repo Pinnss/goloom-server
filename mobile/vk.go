@@ -14,7 +14,7 @@ import (
 	"github.com/Pinnss/goloom-server/internal/connstr"
 	"github.com/Pinnss/goloom-server/internal/identity"
 	"github.com/Pinnss/goloom-server/internal/sfu"
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
@@ -119,12 +119,12 @@ func (c *Client) runVKSession(parentCtx context.Context, params *connstr.Params,
 // buildVKCaptchaSolver возвращает captcha solver с client-side
 // auto-replay (если SetVKProfileStorePath задан):
 //
-//  1. Pool попыток сначала: vkcalls.WithReplaySolver берёт freshest
+//  1. Pool попыток сначала: vkauth.WithReplaySolver берёт freshest
 //     профиль из пула, гонит captcha_v2 через VK API напрямую — без
 //     UI, ~3 сек. Успех → MarkSuccess + return token.
 //  2. Fallback на manual: если пул пуст / replay фейлнулся / VK
 //     прислал slider — поднимаем local reverse-proxy
-//     (vkcalls.AutoProxyCaptchaSolverWithOpener) + зовём native
+//     (vkauth.AutoProxyCaptchaSolverWithOpener) + зовём native
 //     [BrowserLauncher] открыть WebView. Параллельно loggingTransport
 //     внутри proxy ловит componentDone/check тела и кормит профиль в
 //     пул — следующий коннект в этой же сессии работает без UI.
@@ -139,9 +139,9 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 	c.mu.Lock()
 	storePath := c.vkProfileStorePath
 	c.mu.Unlock()
-	var store *vkcalls.ProfileStore
+	var store *vkauth.ProfileStore
 	if storePath != "" {
-		s, err := vkcalls.NewProfileStore(vkcalls.ProfileStoreOptions{Path: storePath})
+		s, err := vkauth.NewProfileStore(vkauth.ProfileStoreOptions{Path: storePath})
 		if err != nil {
 			c.logger.Printf("vk-calls: client profile store init failed (%v); manual captcha each time", err)
 		} else {
@@ -154,9 +154,9 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 		c.emitPhase("captcha", "open captcha in WebView")
 		launcher.Open(url)
 	}
-	base := vkcalls.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, store, opener)
+	base := vkauth.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, store, opener)
 	if store != nil {
-		return vkcalls.WithReplaySolver(store, base, c.logger)
+		return vkauth.WithReplaySolver(store, base, c.logger)
 	}
 	return base
 }

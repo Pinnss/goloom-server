@@ -6,7 +6,7 @@
 // Лифтнут из cacggghp/vk-turn-proxy PR #162 client/captcha_v2.go,
 // адаптирован под нашу архитектуру:
 //   - вместо их `Profile + SavedProfile` используем
-//     [browserProfile] (текущая попытка) + [CapturedProfile] (из пула)
+//     [BrowserProfile] (текущая попытка) + [CapturedProfile] (из пула)
 //   - tls-client + fhttp обязательны: VK WAF матчит JA3 и порядок
 //     заголовков, на stdlib net/http запросы реджектятся
 //   - slider не поддержан в этой слайсе (S1c-checkbox-only) —
@@ -25,7 +25,7 @@
 //   8. POST captchaNotRobot.check             → success_token
 //   9. POST captchaNotRobot.endSession        → cleanup (fail-soft)
 
-package vkcalls
+package vkauth
 
 import (
 	"bytes"
@@ -119,7 +119,7 @@ var ErrCaptchaV2Bot = errors.New("vkcalls: captcha v2: bot challenge")
 // browser_fp + UA для replay'я (если не nil — replay; если nil —
 // генерируется свежий browser_fp но device берётся из default'а,
 // шансов меньше).
-func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profile browserProfile, saved *CapturedProfile, lg *log.Logger) (string, error) {
+func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profile BrowserProfile, saved *CapturedProfile, lg *log.Logger) (string, error) {
 	if challenge.SessionToken == "" {
 		return "", fmt.Errorf("vkcalls: captcha v2: empty session_token (challenge: %+v)", challenge)
 	}
@@ -139,7 +139,7 @@ func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profi
 	// auth-ладдере).
 	effectiveProfile := profile
 	if saved != nil && saved.UserAgent != "" {
-		effectiveProfile = browserProfile{
+		effectiveProfile = BrowserProfile{
 			UserAgent:       saved.UserAgent,
 			SecChUa:         profile.SecChUa,
 			SecChUaMobile:   profile.SecChUaMobile,
@@ -181,7 +181,7 @@ func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profi
 type captchaV2Session struct {
 	ctx          context.Context
 	client       tlsclient.HttpClient
-	profile      browserProfile
+	profile      BrowserProfile
 	saved        *CapturedProfile
 	lg           *log.Logger
 	sessionToken string
@@ -548,7 +548,7 @@ func captchaV2EncodeForm(form [][2]string) string {
 	return b.String()
 }
 
-func applyBrowserProfileFhttp(req *fhttp.Request, profile browserProfile) {
+func applyBrowserProfileFhttp(req *fhttp.Request, profile BrowserProfile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)

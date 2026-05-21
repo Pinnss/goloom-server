@@ -9,6 +9,12 @@ import (
 	"syscall"
 
 	"github.com/Pinnss/goloom-server/internal/inbound"
+
+	// Side-effect imports — register relay impls into [relay.Get].
+	// Without these, inbound.Spec.Transport="vk-turn" would fail at
+	// resolve time. Sister directory to internal/sfu/{telemost,vkcalls,livekit}
+	// pattern, which are pulled in by internal/inbound itself.
+	_ "github.com/Pinnss/goloom-server/internal/relay/vkturn"
 )
 
 func main() {

@@ -16,6 +16,8 @@
 //	GET    /api/inbounds/{id}/client.conf   wg client config
 //	GET    /api/inbounds/{id}/connstr       goloom:// connection string
 //	GET    /api/inbounds/{id}/qr.png        QR PNG of the connection string
+//	GET    /api/inbounds/{id}/vkturn-link   vkturnproxy:// link (anton48 clients)
+//	GET    /api/inbounds/{id}/vkturn-qr.png QR PNG of the vkturnproxy:// link
 //	GET    /api/inbounds/{id}/history       per-inbound traffic samples
 //	GET    /api/system/wg-interfaces        live wg interface list
 //

@@ -47,6 +47,7 @@ import (
 	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
 	telemost "github.com/Pinnss/goloom-server/internal/sfu/telemost"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 
 	"github.com/Pinnss/goloom-server/internal/tun"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
@@ -662,7 +663,7 @@ func (s *Service) buildConnectSpec(cfg Config) sfu.ConnectSpec {
 			// their workstation and can solve the captcha in 1
 			// click. AutoProxy is the right default for any code
 			// path that builds wgclient.Config.
-			CaptchaSolver: vkcalls.AutoProxyCaptchaSolver(2*time.Minute, s.logger, nil),
+			CaptchaSolver: vkauth.AutoProxyCaptchaSolver(2*time.Minute, s.logger, nil),
 		}
 	}
 	return cs

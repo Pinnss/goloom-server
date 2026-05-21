@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Pinnss/goloom-server/internal/sfu"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 )
 
 const (
@@ -76,7 +77,7 @@ type AuthResult struct {
 	// Profile — браузерный fingerprint, использованный во всём
 	// auth-ладдере. peer.go должен предъявить тот же UA на WS-dial,
 	// иначе VK увидит «другое устройство присоединилось к сессии».
-	Profile browserProfile
+	Profile vkauth.BrowserProfile
 }
 
 // DoAuth runs the 4-step ladder. Returns enough state to open the
@@ -87,7 +88,7 @@ func DoAuth(ctx context.Context, lg *log.Logger, spec AuthSpec) (*AuthResult, er
 
 	// Один профиль (UA + sec-ch-ua-*) на всю сессию — смена
 	// fingerprint между шагами сама по себе bot-сигнал.
-	profile := pickProfile()
+	profile := vkauth.PickProfile()
 	res.Profile = profile
 	lg.Printf("auth identity: %s", shortUA(profile.UserAgent))
 
@@ -163,7 +164,7 @@ func DoAuth(ctx context.Context, lg *log.Logger, spec AuthSpec) (*AuthResult, er
 
 // ─── step 0: warmup, get seed anonym JWT ───────────────────────────
 
-func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile) (string, error) {
+func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger, profile vkauth.BrowserProfile) (string, error) {
 	form := url.Values{}
 	form.Set("client_id", vkClientID)
 	form.Set("token_type", "messages")
@@ -199,7 +200,7 @@ func vkSeedAnonymToken(ctx context.Context, c *http.Client, lg *log.Logger, prof
 // getAnonymousToken. Реальный web-клиент VK всегда делает этот шаг
 // (миниатюра/имя организатора в pre-join экране); пропуск — bot-сигнал.
 // Ответ нам не нужен, важен только сам факт запроса.
-func vkGetCallPreview(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, shortID, seedToken string) error {
+func vkGetCallPreview(ctx context.Context, c *http.Client, lg *log.Logger, profile vkauth.BrowserProfile, shortID, seedToken string) error {
 	endpoint := "https://api.vk.ru/method/calls.getCallPreview?v=" + vkAPIVersion + "&client_id=" + vkClientID
 	form := url.Values{}
 	form.Set("vk_join_link", "https://vk.com/call/join/"+shortID)
@@ -211,7 +212,7 @@ func vkGetCallPreview(ctx context.Context, c *http.Client, lg *log.Logger, profi
 
 // ─── step 1: VK API ────────────────────────────────────────────────
 
-func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, spec AuthSpec, seedToken string) (string, error) {
+func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, profile vkauth.BrowserProfile, spec AuthSpec, seedToken string) (string, error) {
 	endpoint := "https://api.vk.ru/method/calls.getAnonymousToken?v=" + vkAPIVersion + "&client_id=" + vkClientID
 
 	doRequest := func(extra url.Values) ([]byte, error) {
@@ -359,7 +360,7 @@ type vkError struct {
 
 // ─── step 2: OK SDK auth.anonymLogin ───────────────────────────────
 
-func okAnonymLogin(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, deviceID string) (string, error) {
+func okAnonymLogin(ctx context.Context, c *http.Client, lg *log.Logger, profile vkauth.BrowserProfile, deviceID string) (string, error) {
 	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, deviceID)
 
 	form := url.Values{}
@@ -413,7 +414,7 @@ type okJoinResponse struct {
 	ErrorMsg  string `json:"error_msg,omitempty"`
 }
 
-func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, profile browserProfile, shortID, anonymToken, sessionKey string) (*okJoinResponse, error) {
+func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, profile vkauth.BrowserProfile, shortID, anonymToken, sessionKey string) (*okJoinResponse, error) {
 	form := url.Values{}
 	form.Set("joinLink", shortID)
 	form.Set("isVideo", "false")
@@ -452,7 +453,7 @@ func okJoinByLink(ctx context.Context, c *http.Client, lg *log.Logger, profile b
 //
 // extraHeaders переопределяют дефолты — нужно крайне редко
 // (например, для /not_robot_captcha с другим Origin).
-func postForm(ctx context.Context, c *http.Client, url string, form url.Values, profile browserProfile, extraHeaders map[string]string) ([]byte, error) {
+func postForm(ctx context.Context, c *http.Client, url string, form url.Values, profile vkauth.BrowserProfile, extraHeaders map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err

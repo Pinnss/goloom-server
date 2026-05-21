@@ -20,7 +20,7 @@
 // handlers are mounted (own ephemeral HTTP server vs. an existing one)
 // and how the URL is delivered to the operator (auto-open browser vs.
 // admin-panel badge).
-package vkcalls
+package vkauth
 
 import (
 	"bytes"

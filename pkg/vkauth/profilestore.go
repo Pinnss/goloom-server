@@ -18,7 +18,7 @@
 // (`<dir-of-yaml>/vkcalls/profiles.json`). Атомарная запись через
 // tmp+rename. Concurrent access защищён мьютексом.
 
-package vkcalls
+package vkauth
 
 import (
 	"crypto/rand"

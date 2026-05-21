@@ -90,6 +90,12 @@ type Allocation struct {
 	Port       int     // 51820
 	Server     KeyPair
 	Client     KeyPair
+
+	// PresharedKey — optional 32-byte base64 PSK. Empty by default;
+	// caller (e.g. admin handler for vk-turn inbounds) may set this
+	// before [CreateInterface] to bake `PresharedKey = …` into the
+	// peer section of the wg-quick config.
+	PresharedKey string
 }
 
 // Allocate reserves the next free (subnet, port, iface) triple WITHOUT
@@ -169,7 +175,7 @@ PostDown = iptables -D FORWARD -i %%i -j ACCEPT; iptables -D FORWARD -o %%i -j A
 [Peer]
 PublicKey = %s
 AllowedIPs = %s/32
-`,
+%s`,
 		a.Server.Private,
 		a.ServerIP.String(),
 		a.Port,
@@ -177,6 +183,7 @@ AllowedIPs = %s/32
 		a.Subnet, p.externalIface,
 		a.Client.Public,
 		a.ClientIP.String(),
+		presharedKeyLine(a.PresharedKey),
 	)
 
 	path := filepath.Join(p.configDir, a.Iface+".conf")
@@ -236,13 +243,23 @@ PublicKey = %s
 Endpoint = %s
 AllowedIPs = 0.0.0.0/1, 128.0.0.0/1
 PersistentKeepalive = 25
-`,
+%s`,
 		a.Client.Private,
 		a.ClientIP.String(),
 		dnsLine,
 		a.Server.Public,
 		publicEndpoint,
+		presharedKeyLine(a.PresharedKey),
 	)
+}
+
+// presharedKeyLine returns "PresharedKey = …\n" when psk is non-empty
+// or "" otherwise — pasted into the wg-quick peer section.
+func presharedKeyLine(psk string) string {
+	if psk == "" {
+		return ""
+	}
+	return fmt.Sprintf("PresharedKey = %s\n", psk)
 }
 
 func ipFromSubnet(ipnet *net.IPNet, host byte) net.IP {

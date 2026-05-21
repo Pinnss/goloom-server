@@ -14,7 +14,7 @@
 //    так что после ручного solve пул пополнится и следующий captcha
 //    пройдёт без UI.
 
-package vkcalls
+package vkauth
 
 import (
 	"context"
@@ -27,10 +27,10 @@ import (
 // WithReplaySolver оборачивает base-solver auto-replay logic'ой.
 // store — пул FP. Если store == nil — возвращает base без изменений.
 //
-// Внутри пикает свежий [browserProfile] для sec-ch-ua-* (UA при этом
+// Внутри пикает свежий [BrowserProfile] для sec-ch-ua-* (UA при этом
 // перезаписывается на сохранённый из CapturedProfile.UserAgent — он
 // «доказан» на проде). Auth-ладдер использует свой собственный
-// pickProfile() — fingerprint'ы могут разойтись между ладдером и
+// PickProfile() — fingerprint'ы могут разойтись между ладдером и
 // captcha replay, что не должно быть критично: VK API endpoints для
 // auth и для captchaNotRobot разные, и реальные браузеры могут менять
 // UA посередине сессии (расширения, обновления). При желании — можно
@@ -51,7 +51,7 @@ func WithReplaySolver(store *ProfileStore, base sfu.VKCaptchaSolver, lg *log.Log
 			lg.Printf("vkcalls/captcha-replay: trying profile %s (success=%d fail=%d ua=%s)",
 				picked.ID, picked.Successes, picked.Failures, shortUA(picked.UserAgent))
 		}
-		token, err := SolveCaptchaV2(ctx, ch, pickProfile(), picked, lg)
+		token, err := SolveCaptchaV2(ctx, ch, PickProfile(), picked, lg)
 		if err == nil {
 			store.MarkSuccess(picked.ID)
 			if lg != nil {

@@ -19,6 +19,7 @@ func (s *Server) registerHTMXRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /htmx/inbound/new", s.handleHTMXInboundForm)
 	mux.HandleFunc("GET /htmx/inbound/{id}/status", s.handleHTMXInboundStatus)
 	mux.HandleFunc("GET /htmx/inbound/{id}/connstr", s.handleHTMXConnStrToast)
+	mux.HandleFunc("GET /htmx/inbound/{id}/vkturn-link", s.handleHTMXVKTurnLinkToast)
 	mux.HandleFunc("GET /htmx/wg-interfaces", s.handleHTMXWGInterfaces)
 	mux.HandleFunc("GET /htmx/inbounds/stream", s.handleHTMXInboundsStream)
 }
@@ -103,6 +104,48 @@ func (s *Server) handleHTMXConnStrToast(w http.ResponseWriter, r *http.Request) 
 	>
 	  <div class="flex items-center gap-2 mb-2">
 	    <strong>connection string</strong>
+	    <button class="ml-auto btn-primary text-[10px] px-2 py-0.5"
+	      @click="copy()" x-text="copied ? '✓ скопировано' : '📋 Скопировать'"
+	    >📋 Скопировать</button>
+	  </div>
+	  <textarea id="toast-cs-src" readonly
+	    class="font-mono text-[11px] w-full bg-bg/60 p-2 rounded border border-border resize-none break-all"
+	    style="overflow-wrap:anywhere; word-break:break-all; white-space:pre-wrap"
+	    rows="4" onclick="this.select()"
+	  >%s</textarea>
+	</div>`, uriEsc)
+}
+
+// handleHTMXVKTurnLinkToast is the vk-turn-link analogue of
+// [handleHTMXConnStrToast] — same toast UX, different payload source.
+func (s *Server) handleHTMXVKTurnLinkToast(w http.ResponseWriter, r *http.Request) {
+	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), errStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	uriEsc := escapeHTML(uri)
+	fmt.Fprintf(w, `<div
+	  class="card text-xs w-[min(560px,calc(100vw-2rem))]"
+	  x-data="{shown:true,copied:false,
+	           copy(){
+	             const ta=document.getElementById('toast-cs-src');
+	             navigator.clipboard.writeText(ta.value).then(()=>{
+	               this.copied=true;
+	               setTimeout(()=>{this.shown=false},900);
+	             }).catch(()=>{
+	               ta.removeAttribute('readonly'); ta.select();
+	               document.execCommand('copy');
+	               this.copied=true;
+	               setTimeout(()=>{this.shown=false},900);
+	             });
+	           }}"
+	  x-init="setTimeout(()=>shown=false,8000)"
+	  x-show="shown" x-transition.opacity
+	>
+	  <div class="flex items-center gap-2 mb-2">
+	    <strong>vkturnproxy:// link</strong>
 	    <button class="ml-auto btn-primary text-[10px] px-2 py-0.5"
 	      @click="copy()" x-text="copied ? '✓ скопировано' : '📋 Скопировать'"
 	    >📋 Скопировать</button>

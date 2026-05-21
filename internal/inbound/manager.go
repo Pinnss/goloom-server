@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
@@ -34,12 +34,12 @@ type Manager struct {
 	// captcha_mode=admin-webview will fail at Connect time. Set via
 	// [SetCaptchaBroker]; goroutine-safe because it's only mutated at
 	// startup before any Runner reads it.
-	captchaBroker vkcalls.AdminCaptchaBroker
+	captchaBroker vkauth.AdminCaptchaBroker
 
 	// vkProfileStore — пул browser-FP для VK auto-replay solver
 	// (S1c). nil → replay выключен, captcha решается interactive.
 	// Set via [SetVKProfileStore]; mutated only at startup.
-	vkProfileStore *vkcalls.ProfileStore
+	vkProfileStore *vkauth.ProfileStore
 
 	// onChange is fired whenever the spec set changes (add/remove/toggle)
 	// so the caller can persist state.
@@ -102,7 +102,7 @@ func (m *Manager) SetOnChange(fn func()) {
 // Manager'а, и runners созданные до его вызова навсегда оставались с
 // nil broker'ом — приходилось тоглить инбаунды через админку чтобы
 // «подхватить».
-func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
+func (m *Manager) SetCaptchaBroker(b vkauth.AdminCaptchaBroker) {
 	m.mu.Lock()
 	m.captchaBroker = b
 	for _, e := range m.entries {
@@ -116,7 +116,7 @@ func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
 // автоматически из пула, при провале — фоллбэк на interactive solver.
 // Pass nil to disable auto-replay. Пропагируется в существующие
 // runners (см. [SetCaptchaBroker] про rationale).
-func (m *Manager) SetVKProfileStore(s *vkcalls.ProfileStore) {
+func (m *Manager) SetVKProfileStore(s *vkauth.ProfileStore) {
 	m.mu.Lock()
 	m.vkProfileStore = s
 	for _, e := range m.entries {
@@ -334,7 +334,18 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 // несколько потерянных пакетов = ~75 сек. С запасом 120 сек гарантирует,
 // что мы не дёрнем здоровое-но-тихое соединение, но всё-таки реагируем
 // быстрее, чем за 15 часов простоя как было до фикса.
+//
+// Для relay-family inbound'ов работаем по другим счётчикам — у них
+// нет wgrelay.Bridge, RxBytes всегда нулевой. Используем дельту
+// RelayAccepted + текущий ActiveConnections: если за окно не появилось
+// ни одного нового accept'а И прямо сейчас ноль активных коннектов,
+// считаем listener'а потенциально зависшим и кикаем его. Иначе —
+// идём по обычной Bridge-логике.
 func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+	if isRelayTransport(r.Spec.Transport) {
+		m.watchdogRelay(ctx, cancel, r)
+		return
+	}
 	const (
 		tick           = 30 * time.Second
 		rxStallTimeout = 2 * time.Minute
@@ -376,6 +387,70 @@ func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Ru
 			if time.Since(lastChange) > rxStallTimeout {
 				m.logger.Printf("inbound %s: no rx for %s while phase=relaying — forcing reconnect",
 					r.Spec.Tag, rxStallTimeout)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// watchdogRelay — версия для transport=vk-turn (и других relay-family).
+// Считает listener'а живым пока:
+//   - есть активные коннекты (ActiveConnections > 0), ИЛИ
+//   - за окно relayStallTimeout приехал хоть один новый accept
+//     (TotalAccepted увеличился).
+//
+// Если оба условия false — listener'а либо никто не нашёл за окно,
+// либо он стал отвергать handshake'и, либо что-то сгнило между
+// accept-loop'ом и pion/dtls. Cancel'ит local ctx чтобы поднять
+// listener заново с чистого листа.
+//
+// Окно длиннее SFU-watchdog (10 мин vs 2 мин): vk-turn клиенту дорого
+// переподключаться (VK captcha = десятки секунд + риск rate-limit),
+// поэтому stale-listener не такая катастрофа как stale-bridge, и
+// порог терпимости можно поднять.
+func (m *Manager) watchdogRelay(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+	const (
+		tick               = 30 * time.Second
+		relayStallTimeout  = 10 * time.Minute
+	)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var (
+		lastAccepted uint64
+		lastChange   = time.Now()
+		wasActive    bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st := r.Status()
+			if st.Phase != "relaying" {
+				lastAccepted = 0
+				lastChange = time.Now()
+				wasActive = false
+				continue
+			}
+			if !wasActive {
+				wasActive = true
+				lastAccepted = st.RelayAccepted
+				lastChange = time.Now()
+				continue
+			}
+			// Любой из сигналов жизни сбрасывает таймер:
+			//   - новый accept за окно → клиент дошёл до DTLS handshake
+			//   - открытый коннект прямо сейчас → реальный трафик
+			if st.RelayAccepted != lastAccepted || st.RelayActive > 0 {
+				lastAccepted = st.RelayAccepted
+				lastChange = time.Now()
+				continue
+			}
+			if time.Since(lastChange) > relayStallTimeout {
+				m.logger.Printf("inbound %s: no relay activity for %s (accepted stuck at %d, active=0) — forcing reconnect",
+					r.Spec.Tag, relayStallTimeout, st.RelayAccepted)
 				cancel()
 				return
 			}
