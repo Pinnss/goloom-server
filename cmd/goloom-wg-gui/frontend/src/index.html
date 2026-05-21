@@ -98,6 +98,7 @@
                 <option value="telemost">Telemost</option>
                 <option value="livekit-wb-stream">WB Stream (LiveKit)</option>
                 <option value="vk-calls">VK Calls (anonymous join)</option>
+                <option value="vk-turn-srtp">VK TURN SRTP (recommended)</option>
             </select>
 
             <div class="manual-fields" data-for="telemost">
@@ -123,6 +124,28 @@
                        placeholder="https://vk.com/call/join/..."/>
                 <span class="muted-block hint">
                     При подключении откроется браузер с captcha — один клик «Я не робот» и можно работать.
+                </span>
+            </div>
+
+            <div class="manual-fields" data-for="vk-turn-srtp" hidden>
+                <label class="field-label" for="pf-srtp-peer">Адрес сервера (host:port)</label>
+                <input id="pf-srtp-peer" class="field" type="text" autocomplete="off"
+                       placeholder="vps.example.com:56001"/>
+                <span class="muted-block hint">
+                    Из админ-панели: карточка vk-turn-srtp инбаунда → ListenAddr. Обычно host:port внешнего IP сервера.
+                </span>
+
+                <label class="field-label" for="pf-srtp-vklink">VK Call link (для TURN-credentials)</label>
+                <input id="pf-srtp-vklink" class="field" type="text" autocomplete="off"
+                       placeholder="https://vk.com/call/join/..."/>
+                <span class="muted-block hint">
+                    Любой рабочий звонок — клиент через него получает временные VK TURN-credentials.
+                </span>
+
+                <label class="field-label" for="pf-srtp-nconns">Параллельных TURN-аллокаций</label>
+                <input id="pf-srtp-nconns" class="field" type="number" min="1" max="50" value="10" autocomplete="off"/>
+                <span class="muted-block hint">
+                    VK шейпит per-allocation; больше allocations → выше скорость. iOS anton48 build125 default — 10. Свыше ~30 VK может срезать rate-limit.
                 </span>
             </div>
 

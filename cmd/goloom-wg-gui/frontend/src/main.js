@@ -45,6 +45,9 @@ const els = {
     plkToken:       document.getElementById('pf-lk-token'),
     plkCookies:     document.getElementById('pf-lk-cookies'),
     pvkLink:        document.getElementById('pf-vk-link'),
+    psrtpPeer:      document.getElementById('pf-srtp-peer'),
+    psrtpVKLink:    document.getElementById('pf-srtp-vklink'),
+    psrtpNConns:    document.getElementById('pf-srtp-nconns'),
     plisten:        document.getElementById('pf-listen'),
     pAutoWG:        document.getElementById('pf-autowg'),
     pSaveBtn:       document.getElementById('btn-profile-save'),
@@ -230,11 +233,15 @@ function openProfileDialog(profile) {
     els.ptransport.value = cfg.transport || 'telemost';
     // Both Telemost and VK Calls use cfg.meeting — populate whichever
     // input is visible based on transport.
-    els.pmeeting.value   = cfg.transport === 'vk-calls' ? '' : (cfg.meeting || '');
+    els.pmeeting.value   = (cfg.transport === 'vk-calls' || cfg.transport === 'vk-turn-srtp') ? '' : (cfg.meeting || '');
     els.pvkLink.value    = cfg.transport === 'vk-calls' ? (cfg.meeting || '') : '';
     els.plkRoom.value    = cfg.livekit_room_url     || '';
     els.plkToken.value   = cfg.livekit_access_token || '';
     els.plkCookies.value = cfg.livekit_cookies      || '';
+    const srtp = cfg.vk_turn_srtp || {};
+    els.psrtpPeer.value    = srtp.peer_address    || '';
+    els.psrtpVKLink.value  = cfg.transport === 'vk-turn-srtp' ? (cfg.meeting || '') : '';
+    els.psrtpNConns.value  = srtp.num_connections || 10;
     els.plisten.value    = cfg.listen_addr          || '';
     // AutoWG defaults to ON for new profiles. For edit mode we
     // reflect the saved value — the backend gates by whether the
@@ -303,11 +310,16 @@ async function saveProfileFromDialog() {
                 ? (profiles.find((p) => p.id === editingProfileId) || {}).config || {}
                 : {};
             const transport = els.ptransport.value;
-            // Meeting field is shared between Telemost and VK Calls
-            // (both take a single URL); pick the right input.
-            const meeting = transport === 'vk-calls'
-                ? (els.pvkLink.value || '').trim()
-                : (els.pmeeting.value || '').trim();
+            // Meeting field is shared between Telemost / VK Calls / VK TURN-SRTP
+            // (all take a single URL); pick the right input.
+            let meeting;
+            if (transport === 'vk-calls') {
+                meeting = (els.pvkLink.value || '').trim();
+            } else if (transport === 'vk-turn-srtp') {
+                meeting = (els.psrtpVKLink.value || '').trim();
+            } else {
+                meeting = (els.pmeeting.value || '').trim();
+            }
             const cfg = {
                 transport,
                 meeting,
@@ -320,6 +332,18 @@ async function saveProfileFromDialog() {
                 listen_addr: (els.plisten.value || '').trim(),
                 auto_wg: !!els.pAutoWG.checked,
                 wg: existing.wg || {},
+                vk_turn_srtp:         transport === 'vk-turn-srtp'
+                    ? {
+                        peer_address:    (els.psrtpPeer.value || '').trim(),
+                        num_connections: Number((els.psrtpNConns.value || '10').trim()) || 10,
+                        // preserve existing WRAP fields if user edits an
+                        // imported link that had them; new SRTP profiles
+                        // never set wrap fields.
+                        use_wrap:        (existing.vk_turn_srtp || {}).use_wrap || false,
+                        wrap_key_hex:    (existing.vk_turn_srtp || {}).wrap_key_hex || '',
+                        mtu:             (existing.vk_turn_srtp || {}).mtu || 0,
+                      }
+                    : existing.vk_turn_srtp || {},
             };
             saved = await window.go.main.App.SaveProfile(editingProfileId || '', name, cfg);
         }
