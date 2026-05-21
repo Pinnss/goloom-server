@@ -18,7 +18,7 @@
 // (~line 600) — там же эта идея, но с прямой записью в SavedProfile
 // и поиском success_token в response.
 
-package vkcalls
+package vkauth
 
 import (
 	"bytes"

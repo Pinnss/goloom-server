@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
@@ -34,12 +34,12 @@ type Manager struct {
 	// captcha_mode=admin-webview will fail at Connect time. Set via
 	// [SetCaptchaBroker]; goroutine-safe because it's only mutated at
 	// startup before any Runner reads it.
-	captchaBroker vkcalls.AdminCaptchaBroker
+	captchaBroker vkauth.AdminCaptchaBroker
 
 	// vkProfileStore — пул browser-FP для VK auto-replay solver
 	// (S1c). nil → replay выключен, captcha решается interactive.
 	// Set via [SetVKProfileStore]; mutated only at startup.
-	vkProfileStore *vkcalls.ProfileStore
+	vkProfileStore *vkauth.ProfileStore
 
 	// onChange is fired whenever the spec set changes (add/remove/toggle)
 	// so the caller can persist state.
@@ -102,7 +102,7 @@ func (m *Manager) SetOnChange(fn func()) {
 // Manager'а, и runners созданные до его вызова навсегда оставались с
 // nil broker'ом — приходилось тоглить инбаунды через админку чтобы
 // «подхватить».
-func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
+func (m *Manager) SetCaptchaBroker(b vkauth.AdminCaptchaBroker) {
 	m.mu.Lock()
 	m.captchaBroker = b
 	for _, e := range m.entries {
@@ -116,7 +116,7 @@ func (m *Manager) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
 // автоматически из пула, при провале — фоллбэк на interactive solver.
 // Pass nil to disable auto-replay. Пропагируется в существующие
 // runners (см. [SetCaptchaBroker] про rationale).
-func (m *Manager) SetVKProfileStore(s *vkcalls.ProfileStore) {
+func (m *Manager) SetVKProfileStore(s *vkauth.ProfileStore) {
 	m.mu.Lock()
 	m.vkProfileStore = s
 	for _, e := range m.entries {

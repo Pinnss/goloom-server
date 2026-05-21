@@ -5,7 +5,7 @@
 //  1. The vkcalls AdminWebviewCaptchaSolver calls Broker.Register,
 //     gets back a proxy URL + a wait channel
 //  2. Broker mounts a per-challenge reverse-proxy at
-//     /captcha-proxy/<id>/ using vkcalls.MountAdminCaptchaProxy, so
+//     /captcha-proxy/<id>/ using vkauth.MountAdminCaptchaProxy, so
 //     the operator's browser can navigate to the challenge with the
 //     same JS-shim experience as AutoProxy.
 //  3. Admin UI surfaces a pending-captcha badge with the proxy URL.
@@ -36,7 +36,7 @@ import (
 	"time"
 
 	"github.com/Pinnss/goloom-server/internal/sfu"
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 )
 
 // captchaURLPrefix is the URL space the broker owns. Per-challenge
@@ -50,7 +50,7 @@ const captchaURLPrefix = "/captcha-proxy"
 const captchaChallengeTTL = 5 * time.Minute
 
 // CaptchaBroker is the admin-side captcha mediator. Implements
-// [vkcalls.AdminCaptchaBroker].
+// [vkauth.AdminCaptchaBroker].
 type CaptchaBroker struct {
 	mu      sync.Mutex
 	pending map[string]*captchaEntry
@@ -70,7 +70,7 @@ type CaptchaBroker struct {
 	// + device + UA из captchaNotRobot.componentDone/.check во время
 	// ручного solve. nil → перехват выключен (broker работает как
 	// раньше).
-	fingerprintSink vkcalls.CaptureSink
+	fingerprintSink vkauth.CaptureSink
 	logger          *log.Logger
 }
 
@@ -98,7 +98,7 @@ func NewCaptchaBroker() *CaptchaBroker {
 // captcha-proxy для всех будущих challenges. Должно вызываться один
 // раз при старте сервера, до первого Register; thread-safe но менять
 // sink в runtime нет смысла. Передай nil чтобы выключить.
-func (b *CaptchaBroker) SetFingerprintSink(sink vkcalls.CaptureSink, lg *log.Logger) {
+func (b *CaptchaBroker) SetFingerprintSink(sink vkauth.CaptureSink, lg *log.Logger) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.fingerprintSink = sink
@@ -146,8 +146,8 @@ func (b *CaptchaBroker) dispatchProxy(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-// Register implements [vkcalls.AdminCaptchaBroker]. Called by
-// [vkcalls.AdminWebviewCaptchaSolver] each time an inbound auth
+// Register implements [vkauth.AdminCaptchaBroker]. Called by
+// [vkauth.AdminWebviewCaptchaSolver] each time an inbound auth
 // chain hits a captcha challenge.
 func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge, tag string) (string, <-chan string) {
 	target, err := neturl.Parse(ch.RedirectURI)
@@ -181,12 +181,12 @@ func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge,
 	// Build a per-challenge mux + mount the proxy handlers there.
 	chMux := http.NewServeMux()
 	b.mu.Lock()
-	mountOpts := vkcalls.MountAdminCaptchaProxyOptions{
+	mountOpts := vkauth.MountAdminCaptchaProxyOptions{
 		FingerprintSink: b.fingerprintSink,
 		Logger:          b.logger,
 	}
 	b.mu.Unlock()
-	if err := vkcalls.MountAdminCaptchaProxy(chMux, urlPrefix, target, func(tok string) {
+	if err := vkauth.MountAdminCaptchaProxy(chMux, urlPrefix, target, func(tok string) {
 		b.resolve(id, tok)
 	}, mountOpts); err != nil {
 		// Should never happen with our params, but if it does, fail
@@ -215,7 +215,7 @@ func (b *CaptchaBroker) Register(ctx context.Context, ch sfu.VKCaptchaChallenge,
 		}
 	}()
 
-	proxyURL := vkcalls.AdminCaptchaProxyURL(urlPrefix, target)
+	proxyURL := vkauth.AdminCaptchaProxyURL(urlPrefix, target)
 	return proxyURL, e.done
 }
 
@@ -229,7 +229,7 @@ func (b *CaptchaBroker) Pending() []PendingCaptcha {
 		out = append(out, PendingCaptcha{
 			ID:           e.id,
 			InboundTag:   e.tag,
-			ProxyURL:     vkcalls.AdminCaptchaProxyURL(captchaURLPrefix+"/"+e.id, e.target),
+			ProxyURL:     vkauth.AdminCaptchaProxyURL(captchaURLPrefix+"/"+e.id, e.target),
 			RegisteredAt: e.registeredAt,
 			ExpiresAt:    e.registeredAt.Add(captchaChallengeTTL),
 		})

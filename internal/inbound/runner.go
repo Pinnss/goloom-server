@@ -19,7 +19,7 @@ import (
 	// to AutoProxyCaptchaSolver for runtime injection.
 	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
 	_ "github.com/Pinnss/goloom-server/internal/sfu/telemost"
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
@@ -61,12 +61,12 @@ type Runner struct {
 	// Populated by [Runner.SetCaptchaBroker], typically called by
 	// the surrounding [Manager] right after NewRunner. nil disables
 	// captcha_mode=admin-webview for this runner.
-	captchaBroker vkcalls.AdminCaptchaBroker
+	captchaBroker vkauth.AdminCaptchaBroker
 
 	// vkProfileStore — пул FP для auto-replay (S1c). Если задан и
 	// captcha_mode=admin-webview/auto, base solver оборачивается в
-	// [vkcalls.WithReplaySolver]. nil → replay выключен.
-	vkProfileStore *vkcalls.ProfileStore
+	// [vkauth.WithReplaySolver]. nil → replay выключен.
+	vkProfileStore *vkauth.ProfileStore
 }
 
 func NewRunner(spec Spec, lg *log.Logger) *Runner {
@@ -76,13 +76,13 @@ func NewRunner(spec Spec, lg *log.Logger) *Runner {
 
 // SetCaptchaBroker swaps in the admin captcha broker used when
 // VKCalls.CaptchaMode=="admin-webview". nil clears it.
-func (r *Runner) SetCaptchaBroker(b vkcalls.AdminCaptchaBroker) {
+func (r *Runner) SetCaptchaBroker(b vkauth.AdminCaptchaBroker) {
 	r.captchaBroker = b
 }
 
 // SetVKProfileStore enables auto-replay для VK captcha (см. S1c).
 // Pass nil чтобы отключить — runner вернётся к interactive-only.
-func (r *Runner) SetVKProfileStore(s *vkcalls.ProfileStore) {
+func (r *Runner) SetVKProfileStore(s *vkauth.ProfileStore) {
 	r.vkProfileStore = s
 }
 
@@ -224,14 +224,14 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 			// (нужна desktop-сессия), pool профилей живёт под admin
 			// captcha-broker. Передаём nil sink — захвата нет, но и
 			// сценарий маргинальный.
-			solver = vkcalls.AutoProxyCaptchaSolver(2*time.Minute, r.Logger, nil)
+			solver = vkauth.AutoProxyCaptchaSolver(2*time.Minute, r.Logger, nil)
 		case "none":
 			solver = nil
 		case "admin-webview":
 			if r.captchaBroker == nil {
 				return cs, fmt.Errorf("inbound %s: captcha_mode=admin-webview but no broker is wired (cmd binary forgot Manager.SetCaptchaBroker?)", r.Spec.Tag)
 			}
-			solver = vkcalls.AdminWebviewCaptchaSolver(r.captchaBroker, r.Spec.Tag, r.Logger)
+			solver = vkauth.AdminWebviewCaptchaSolver(r.captchaBroker, r.Spec.Tag, r.Logger)
 		default:
 			return cs, fmt.Errorf("inbound %s: unsupported vk_calls.captcha_mode %q (use auto|none|admin-webview)", r.Spec.Tag, captchaMode)
 		}
@@ -240,7 +240,7 @@ func (r *Runner) buildConnectSpec() (sfu.ConnectSpec, error) {
 		// профилей задан. На пустой пул / fail replay'я / slider
 		// challenge — фоллбэк на base (без замедления).
 		if solver != nil && r.vkProfileStore != nil {
-			solver = vkcalls.WithReplaySolver(r.vkProfileStore, solver, r.Logger)
+			solver = vkauth.WithReplaySolver(r.vkProfileStore, solver, r.Logger)
 		}
 
 		codec := ""

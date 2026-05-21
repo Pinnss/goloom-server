@@ -1,24 +1,24 @@
-package vkcalls
+package vkauth
 
 import (
 	"math/rand"
 )
 
-// browserProfile — спаренные UA и Client Hints. VK-WAF матчит UA
+// BrowserProfile — спаренные UA и Client Hints. VK-WAF матчит UA
 // против sec-ch-ua-*: рассогласование («Chrome/146 в UA, но
 // sec-ch-ua-platform: macOS на Windows-UA») — сильный bot-сигнал.
 //
-// Список лифтнут из vk-turn-proxy PR #162 client/profiles.go::profileList
+// Список лифтнут из vk-turn-proxy PR #162 client/profiles.go::ProfileList
 // (5 swap'ов из 10 — оставляем самые свежие, чтобы заявленный
 // Chrome version совпадал с реальным major-релизом).
-type browserProfile struct {
+type BrowserProfile struct {
 	UserAgent       string
 	SecChUa         string
 	SecChUaMobile   string
 	SecChUaPlatform string
 }
 
-var profileList = []browserProfile{
+var ProfileList = []BrowserProfile{
 	{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
 		SecChUa:         `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`,
@@ -51,9 +51,9 @@ var profileList = []browserProfile{
 	},
 }
 
-// pickProfile возвращает случайный профиль. Один DoAuth должен
+// PickProfile возвращает случайный профиль. Один DoAuth должен
 // использовать один профиль на все 4 запроса — иначе UA
 // «сменился между шагами», что само по себе bot-сигнал.
-func pickProfile() browserProfile {
-	return profileList[rand.Intn(len(profileList))]
+func PickProfile() BrowserProfile {
+	return ProfileList[rand.Intn(len(ProfileList))]
 }

@@ -8,7 +8,7 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/admin"
 	"github.com/Pinnss/goloom-server/internal/inbound"
-	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgprovision"
 )
 
@@ -66,7 +66,7 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 	// Ошибка инициализации не должна валить старт сервера —
 	// без стора captcha-broker работает как раньше.
 	vkProfilePath := filepath.Join(filepath.Dir(cfg.path), "vkcalls", "profiles.json")
-	vkProfileStore, err := vkcalls.NewProfileStore(vkcalls.ProfileStoreOptions{Path: vkProfilePath})
+	vkProfileStore, err := vkauth.NewProfileStore(vkauth.ProfileStoreOptions{Path: vkProfilePath})
 	if err != nil {
 		lg.Printf("WARN: vkcalls profile store unavailable (%v); captcha-fingerprint capture disabled", err)
 	} else {
