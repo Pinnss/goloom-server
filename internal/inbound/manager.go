@@ -334,7 +334,19 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 // несколько потерянных пакетов = ~75 сек. С запасом 120 сек гарантирует,
 // что мы не дёрнем здоровое-но-тихое соединение, но всё-таки реагируем
 // быстрее, чем за 15 часов простоя как было до фикса.
+//
+// Не применим к relay-family inbound'ам: у них нет wgrelay.Bridge, и
+// RxBytes всегда нулевой — watchdog ложно сработает каждые 2 минуты и
+// будет рвать клиенту DTLS-сессию (заставляя его заново проходить VK
+// captcha). Свежесть relay-listener'а мы можем проверять отдельно через
+// Status.RelayActive когда-нибудь, но сам listener не "застревает" —
+// он просто принимает или не принимает входящие коннекшены, без
+// внутреннего состояния которое может сгнить.
 func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+	if isRelayTransport(r.Spec.Transport) {
+		<-ctx.Done()
+		return
+	}
 	const (
 		tick           = 30 * time.Second
 		rxStallTimeout = 2 * time.Minute
