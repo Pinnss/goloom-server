@@ -34,6 +34,7 @@ type LinkSettings struct {
 	UseDTLS        bool   `json:"useDTLS"`
 	UseWrap        bool   `json:"useWrap"`
 	WrapKeyHex     string `json:"wrapKeyHex"` // 64 hex chars; 64 zeroes when UseWrap=false (anton48 validator)
+	UseSrtp        bool   `json:"useSrtp,omitempty"` // anton48 v1.0-build125+: enables SRTP-framed transport
 	DNSServers     string `json:"dnsServers,omitempty"`
 	NumConnections int    `json:"numConnections,omitempty"`
 	MTU            int    `json:"mtu,omitempty"` // see defaultMTU
@@ -73,6 +74,13 @@ type LinkParams struct {
 	// don't reassemble. The upstream Moroka8 quick_link.py hard-coded
 	// 1280 for the same reason.
 	MTU int
+
+	// UseSrtp toggles the SRTP-framed transport on the iOS client side
+	// (anton48 build125+). Server-side requires a vk-turn-srtp inbound
+	// listening for DTLS-SRTP — set this true *only* when the link
+	// targets a vkturnsrtp.Transport listener; leaving it false keeps
+	// the legacy DTLS+WG path.
+	UseSrtp bool
 }
 
 // link envelope schema version. Must match anton48
@@ -132,6 +140,7 @@ func BuildAnton48Link(p LinkParams) (string, error) {
 		UseDTLS:        true,
 		UseWrap:        p.UseWrap,
 		WrapKeyHex:     wrapKey,
+		UseSrtp:        p.UseSrtp,
 		DNSServers:     p.DNSServers,
 		NumConnections: p.NumConnections,
 		MTU:            mtu,

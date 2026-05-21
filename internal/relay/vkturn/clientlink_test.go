@@ -95,6 +95,31 @@ func TestBuildAnton48Link_WrapOnUsesProvidedKey(t *testing.T) {
 	}
 }
 
+func TestBuildAnton48Link_UseSrtpFlows(t *testing.T) {
+	// Default: UseSrtp=false → field omitted from JSON output (omitempty).
+	link, err := BuildAnton48Link(validParams())
+	if err != nil {
+		t.Fatalf("BuildAnton48Link: %v", err)
+	}
+	const prefix = "vkturnproxy://import?data="
+	raw, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(link, prefix))
+	if strings.Contains(string(raw), `"useSrtp"`) {
+		t.Errorf("default UseSrtp=false should be omitted (omitempty), but JSON contains it: %s", raw)
+	}
+
+	// Explicit true: must surface as useSrtp: true.
+	p := validParams()
+	p.UseSrtp = true
+	link, err = BuildAnton48Link(p)
+	if err != nil {
+		t.Fatalf("BuildAnton48Link UseSrtp=true: %v", err)
+	}
+	got := decodeLink(t, link)
+	if !got.Settings.UseSrtp {
+		t.Error("useSrtp should be true in payload")
+	}
+}
+
 func TestBuildAnton48Link_MTUOverride(t *testing.T) {
 	p := validParams()
 	p.MTU = 1400

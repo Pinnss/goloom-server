@@ -29,6 +29,11 @@ import (
 	// listener vs active SFU client) so the two families stay clean.
 	"github.com/Pinnss/goloom-server/internal/relay/vkturn"
 
+	// Blank import — registers KindVKTurnSRTP with the relay factory.
+	// We don't reference any vkturnsrtp.Options struct from here yet
+	// (Options is empty for now), so the import is side-effect only.
+	_ "github.com/Pinnss/goloom-server/internal/relay/vkturnsrtp"
+
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 )
 
@@ -153,7 +158,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // here so the SFU vs relay split is visible in one place.
 func isRelayTransport(kind string) bool {
 	switch relay.Kind(kind) {
-	case relay.KindVKTurn:
+	case relay.KindVKTurn, relay.KindVKTurnSRTP:
 		return true
 	}
 	return false
@@ -396,6 +401,29 @@ func (r *Runner) buildRelayConfig() (relayPlan, error) {
 			ConnectAddr: r.Spec.WGEndpoint,
 			Options:     opts,
 			Logger:      r.Logger,
+		}
+		return plan, nil
+	case relay.KindVKTurnSRTP:
+		// SRTP transport re-uses Spec.VKTurn for ListenAddr / VKLink
+		// / PresharedKey since the inbound model is otherwise
+		// identical to legacy vk-turn — only the wire framing
+		// differs. WRAP/wrap_key_hex are ignored for SRTP (the
+		// anton48 client side doesn't run both layers at once;
+		// SRTP supersedes WRAP).
+		if r.Spec.VKTurn == nil {
+			return plan, fmt.Errorf("inbound %s: transport=vk-turn-srtp but Spec.VKTurn is nil", r.Spec.Tag)
+		}
+		if r.Spec.VKTurn.ListenAddr == "" {
+			return plan, fmt.Errorf("inbound %s: vk_turn.listen_addr is empty", r.Spec.Tag)
+		}
+		if r.Spec.WGEndpoint == "" {
+			return plan, fmt.Errorf("inbound %s: WGEndpoint required for vk-turn-srtp relay", r.Spec.Tag)
+		}
+		plan.cfg = relay.Config{
+			ListenAddr:  r.Spec.VKTurn.ListenAddr,
+			ConnectAddr: r.Spec.WGEndpoint,
+			// Options nil — vkturnsrtp.Options is empty for now.
+			Logger: r.Logger,
 		}
 		return plan, nil
 	default:
