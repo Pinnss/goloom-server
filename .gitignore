@@ -3,8 +3,12 @@
 /goloom-wg-server
 /goloom-wg-server.exe
 /goloom-wg-server-linux
+/goloom-wg-server-linux-amd64
+/goloom-wg-server-linux-arm64
 /goloom-wg-client
 /goloom-wg-client.exe
+/goloom-wg-gui.exe
+/goloom-wg-gui-windows-amd64.zip
 
 # Local benchmarking / profiling scratchpad — VPS-side scripts and
 # captured traces that aren't part of the shipped product.

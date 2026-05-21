@@ -119,7 +119,7 @@ func (s *Server) handleHTMXConnStrToast(w http.ResponseWriter, r *http.Request) 
 // handleHTMXVKTurnLinkToast is the vk-turn-link analogue of
 // [handleHTMXConnStrToast] — same toast UX, different payload source.
 func (s *Server) handleHTMXVKTurnLinkToast(w http.ResponseWriter, r *http.Request) {
-	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	uri, err := s.buildVKTurnLink(r.PathValue("id"), r.URL.Query().Get("vk_link"))
 	if err != nil {
 		http.Error(w, err.Error(), errStatus(err))
 		return

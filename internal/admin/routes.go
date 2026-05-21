@@ -154,8 +154,18 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Tag == "" || req.Meeting == "" {
-		http.Error(w, "tag and meeting are required", http.StatusBadRequest)
+	if req.Tag == "" {
+		http.Error(w, "tag is required", http.StatusBadRequest)
+		return
+	}
+	// vk-turn-srtp doesn't need a call URL at inbound-create time —
+	// the server never uses it (clients fetch their own TURN creds
+	// against whatever call URL they paste/import into the iOS app).
+	// We still write it into the connection-link payload as a
+	// convenience, but operators can leave it blank and have the
+	// link include a placeholder for the client to swap in.
+	if req.Meeting == "" && req.Transport != "vk-turn-srtp" {
+		http.Error(w, "meeting URL is required for this transport", http.StatusBadRequest)
 		return
 	}
 
@@ -373,7 +383,7 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 // auto-provisioned WG identity (operator created it without
 // AutoProvision and didn't paste keys manually).
 func (s *Server) handleVKTurnLink(w http.ResponseWriter, r *http.Request) {
-	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	uri, err := s.buildVKTurnLink(r.PathValue("id"), r.URL.Query().Get("vk_link"))
 	if err != nil {
 		http.Error(w, err.Error(), errStatus(err))
 		return
@@ -384,7 +394,7 @@ func (s *Server) handleVKTurnLink(w http.ResponseWriter, r *http.Request) {
 
 // handleVKTurnQR is the QR-PNG counterpart of [handleVKTurnLink].
 func (s *Server) handleVKTurnQR(w http.ResponseWriter, r *http.Request) {
-	uri, err := s.buildVKTurnLink(r.PathValue("id"))
+	uri, err := s.buildVKTurnLink(r.PathValue("id"), r.URL.Query().Get("vk_link"))
 	if err != nil {
 		http.Error(w, err.Error(), errStatus(err))
 		return
@@ -568,10 +578,18 @@ func errStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
+// vkLinkPlaceholder is what gets baked into the link payload when no
+// VK call URL was supplied (neither at inbound-create time nor via
+// the override query param). The iOS-side anton48 BackupManager
+// rejects empty strings, so we plant a clearly-recognisable sentinel
+// the operator can spot in the iOS UI and replace before connecting.
+const vkLinkPlaceholder = "https://vk.com/call/join/REPLACE_ME"
+
 // buildVKTurnLink assembles the anton48 connection link for a vk-turn
-// or vk-turn-srtp inbound. Centralised so both the text and QR
-// handlers share validation.
-func (s *Server) buildVKTurnLink(id string) (string, error) {
+// or vk-turn-srtp inbound. `vkLinkOverride` is honoured when non-empty;
+// otherwise Spec.VKTurn.VKLink is used; if both are empty, the link
+// payload contains the placeholder above.
+func (s *Server) buildVKTurnLink(id, vkLinkOverride string) (string, error) {
 	spec, ok := s.opts.Manager.Get(id)
 	if !ok {
 		return "", &vkTurnLinkErr{http.StatusNotFound, "inbound not found"}
@@ -588,8 +606,12 @@ func (s *Server) buildVKTurnLink(id string) (string, error) {
 	if spec.VKTurn.PresharedKey == "" {
 		return "", &vkTurnLinkErr{http.StatusInternalServerError, "missing preshared key (auto-provision skipped it?)"}
 	}
-	if spec.VKTurn.VKLink == "" {
-		return "", &vkTurnLinkErr{http.StatusBadRequest, "VK call URL is empty — re-edit inbound"}
+	vkLink := strings.TrimSpace(vkLinkOverride)
+	if vkLink == "" {
+		vkLink = spec.VKTurn.VKLink
+	}
+	if vkLink == "" {
+		vkLink = vkLinkPlaceholder
 	}
 
 	publicHost, err := s.publicHostForLink()
@@ -618,7 +640,7 @@ func (s *Server) buildVKTurnLink(id string) (string, error) {
 		ServerPublicKey:  spec.ServerWGPublicKey,
 		PresharedKey:     spec.VKTurn.PresharedKey,
 		TunnelAddress:    tunnelAddr,
-		VKLink:           spec.VKTurn.VKLink,
+		VKLink:           vkLink,
 		PeerAddress:      net.JoinHostPort(publicHost, port),
 		UseWrap:          spec.VKTurn.UseWrap,
 		WrapKeyHex:       spec.VKTurn.WrapKeyHex,

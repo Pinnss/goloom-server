@@ -91,6 +91,26 @@ templ InboundCard(s inbound.Status) {
 					title="WireGuard config (для отладки, без vk-turn обёртки)"
 				>{ "⬇ wg.conf" }</a>
 			</div>
+			<details class="mt-1 text-xs">
+				<summary class="cursor-pointer opacity-70 select-none">{ "Сгенерить ссылку с другим звонком" }</summary>
+				<div class="flex gap-1 mt-1" x-data="{ url: '' }">
+					<input
+						class="field-input text-xs py-0.5 flex-1"
+						type="text"
+						placeholder="https://vk.com/call/join/..."
+						x-model="url"
+					/>
+					<button
+						class="btn-primary text-xs px-2 py-1"
+						type="button"
+						:disabled="!url.trim()"
+						@click={ "htmx.ajax('GET', '/htmx/inbound/" + s.ID + "/vkturn-link?vk_link=' + encodeURIComponent(url.trim()), '#toast')" }
+					>{ "Сгенерить" }</button>
+				</div>
+				<p class="opacity-50 mt-1">
+					Сервер не привязан к конкретному звонку. URL пишется в линк только чтобы клиент anton48 знал к какому VK-звонку запрашивать TURN-credentials.
+				</p>
+			</details>
 		} else {
 			<div class="flex items-center justify-center bg-white rounded p-2">
 				<img src={ "/api/inbounds/" + s.ID + "/qr.png" } alt="QR" class="max-w-[180px] aspect-square"/>
