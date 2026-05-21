@@ -356,6 +356,47 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// VKTurnProxyPreview is the JSON payload PreviewVKTurnProxyLink emits.
+// Kotlin / Swift parses it to populate VpnService.Builder /
+// NEPacketTunnelNetworkSettings without re-implementing the JSON+base64
+// link decode on the native side.
+type vkTurnProxyPreview struct {
+	Transport     string   `json:"transport"`      // "vk-turn-srtp" or "vk-turn"
+	TunnelAddress string   `json:"tunnel_address"` // CIDR e.g. "10.66.66.3/24"
+	MTU           int      `json:"mtu"`            // 0 → caller picks default (1280)
+	DNS           []string `json:"dns,omitempty"`
+	VKLink        string   `json:"vk_link,omitempty"`
+}
+
+// PreviewVKTurnProxyLink decodes a vkturnproxy:// connection link
+// into the network parameters the native side needs to build its
+// TUN device (address, MTU, DNS) — without actually opening any
+// connections. Use it from Kotlin / Swift to populate the
+// VpnService.Builder / NEPacketTunnelNetworkSettings before calling
+// the matching Connect* method.
+//
+// Returns the JSON-serialised [vkTurnProxyPreview]. Errors come back
+// as typed [MobileError] so the UI can classify (invalid link =
+// validation; other = unknown).
+func (c *Client) PreviewVKTurnProxyLink(connectionString string) (string, error) {
+	cfg, err := wgclient.FromVKTurnProxyLink(connectionString)
+	if err != nil {
+		return "", mobileErr(ErrInvalidConnString, err)
+	}
+	prev := vkTurnProxyPreview{
+		Transport:     cfg.Transport,
+		TunnelAddress: cfg.WG.ClientAddr,
+		MTU:           cfg.VKTurnSRTP.MTU,
+		DNS:           cfg.WG.DNS,
+		VKLink:        cfg.Meeting,
+	}
+	if prev.MTU == 0 {
+		prev.MTU = 1280
+	}
+	out, _ := json.Marshal(prev)
+	return string(out), nil
+}
+
 // keyB64ToHex converts a 32-byte base64 WG key into the hex form
 // expected by wireguard-go's IpcSet. Duplicated from
 // pkg/wgclient/autowg_windows.go since mobile/ can't import a

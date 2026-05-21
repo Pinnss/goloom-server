@@ -11,3 +11,9 @@ import "errors"
 func (c *Client) ConnectVKTurnSRTP(_ string, _ int) (string, error) {
 	return "", mobileErr(ErrUnknown, errors.New("vk-turn-srtp client: not supported on this OS target (Linux/Android only)"))
 }
+
+// PreviewVKTurnProxyLink non-linux stub — preview returns the same
+// "unsupported" error so callers branch uniformly.
+func (c *Client) PreviewVKTurnProxyLink(_ string) (string, error) {
+	return "", mobileErr(ErrUnknown, errors.New("vkturnproxy:// preview: not supported on this OS target"))
+}
