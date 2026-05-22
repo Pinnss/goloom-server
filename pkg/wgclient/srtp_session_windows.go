@@ -98,7 +98,15 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	if numConns <= 0 {
 		numConns = 10
 	}
-	creds := TURNCreds{Username: authRes.TurnUser, Password: authRes.TurnPass}
+	// TCP is the default since anton48 build128 — VK's per-cred
+	// allocation-rate throttle hits 36-58% of UDP attempts but ~0%
+	// on TCP. UseUDPForTURN flips back to UDP for networks that
+	// block TCP-to-relay.
+	creds := TURNCreds{
+		Username: authRes.TurnUser,
+		Password: authRes.TurnPass,
+		UseTCP:   !cfg.VKTurnSRTP.UseUDPForTURN,
+	}
 
 	// Build a working list of TURN endpoints (UDP-only; turns://
 	// would need TCP/TLS via pion which we don't wire up yet).

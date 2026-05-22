@@ -556,13 +556,31 @@ func (c *wrappedConn) Read(b []byte) (int, error) {
 	}
 }
 
+// Write is fully serialized — c.mu spans the entire method instead
+// of just the seq/ts increment. Rationale (mirrors anton48 build129
+// fix): pion/srtp.Context.EncryptRTP is NOT safe for concurrent use —
+// its HMAC-SHA1 keeps internal state between Sum() calls — and the
+// reusable scratch buffers (txMarshalBuf / txEncBuf) would also race
+// on concurrent writers. Build125 of the iOS client crashed with
+// `panic: d.nx != 0` in crypto/sha1.(*digest).checkSum exactly here:
+// the active-probe-on-wake goroutine and the user-traffic send
+// goroutine both raced through EncryptRTP at the same wake instant.
+//
+// Goloom client side has the same pair of writers (SRTPBind.Send
+// from the WG stack + SRTPBind.probeSenderLoop from the probe
+// machinery), so the fix MUST land here too — same wrappedConn
+// powers both desktop and Android SRTP clients via SRTPBind.
+//
+// Contention is minimal: probe writes are ~12 bytes once per 30s,
+// real traffic dominates and serializes safely.
 func (c *wrappedConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	seq := c.seq
 	ts := c.ts
 	c.seq++
 	c.ts += uint32(len(b))
-	c.mu.Unlock()
 
 	pkt := rtp.Packet{
 		Header: rtp.Header{
@@ -574,7 +592,8 @@ func (c *wrappedConn) Write(b []byte) (int, error) {
 		},
 		Payload: b,
 	}
-	// Reuse c.txMarshalBuf and c.txEncBuf — see iOS-side srtpwrap.
+	// Reuse c.txMarshalBuf and c.txEncBuf — both writes to these
+	// scratch buffers happen under c.mu now, so the reuse is safe.
 	needSize := pkt.MarshalSize()
 	if cap(c.txMarshalBuf) < needSize {
 		c.txMarshalBuf = make([]byte, needSize+64)

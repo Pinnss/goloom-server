@@ -34,12 +34,14 @@ import (
 	"github.com/pion/turn/v5"
 )
 
-// TURNAllocation owns the underlying TURN client + the UDP conn it
-// runs over. Closing it tears both down in the right order.
+// TURNAllocation owns the underlying TURN client + the conn it runs
+// over (UDP or TCP, see TURNCreds.UseTCP). Closing it tears both
+// down in the right order.
 type TURNAllocation struct {
 	client    *turn.Client
 	relay     net.PacketConn
-	udpConn   *net.UDPConn
+	udpConn   *net.UDPConn // non-nil when control channel is UDP
+	tcpConn   net.Conn     // non-nil when control channel is TCP
 	peerAddr  *net.UDPAddr
 	closeOnce sync.Once
 }
@@ -64,23 +66,36 @@ func (a *TURNAllocation) Close() {
 		if a.udpConn != nil {
 			_ = a.udpConn.Close()
 		}
+		if a.tcpConn != nil {
+			_ = a.tcpConn.Close()
+		}
 	})
 }
 
 // TURNCreds is the long-term auth bundle returned by VK's
 // calls.getAnonymousToken + joinConversationByLink chain.
+//
+// UseTCP selects the iOS↔TURN-relay control transport. TCP is the
+// anton48 build128+ default and is strongly recommended: empirically
+// VK applies a per-credential allocation-rate throttle that hits
+// 36-58% of UDP allocate attempts but ~0% on TCP (introduced
+// 2026-05-18). UDP path is kept as an escape hatch for networks
+// that block TCP-to-relay altogether.
 type TURNCreds struct {
 	Username string
 	Password string
+	UseTCP   bool
 }
 
-// AllocateTURN dials turnAddr (UDP), runs the TURN ALLOCATE handshake
-// using creds, and returns a handle whose Relay() can be wrapped by
+// AllocateTURN dials turnAddr, runs the TURN ALLOCATE handshake using
+// creds, and returns a handle whose Relay() can be wrapped by
 // vkturnsrtp.Client. peerAddrStr is resolved up front so wrappers
 // downstream don't have to.
 //
 // ctx bounds the dial + handshake setup; once the returned handle
 // is in hand, its lifetime is decoupled from ctx (call Close()).
+//
+// Transport (UDP vs TCP) is taken from creds.UseTCP.
 func AllocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds TURNCreds) (*TURNAllocation, error) {
 	turnUDP, err := net.ResolveUDPAddr("udp", turnAddr)
 	if err != nil {
@@ -91,51 +106,75 @@ func AllocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds TURNC
 		return nil, fmt.Errorf("resolve peer %s: %w", peerAddrStr, err)
 	}
 
-	// Use DialUDP so the OS does the source-port selection and we
-	// get a connected socket — slightly less round-trippy than
-	// ListenUDP + WriteTo per packet, and matches anton48's
-	// connectedUDPConn pattern.
-	var d net.Dialer
-	d.Timeout = 5 * time.Second
-	rawConn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "udp", turnAddr)
-	if err != nil {
-		return nil, fmt.Errorf("dial TURN UDP %s: %w", turnAddr, err)
-	}
-	udpConn, ok := rawConn.(*net.UDPConn)
-	if !ok {
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("dial returned non-UDPConn %T", rawConn)
+	var (
+		conn    net.PacketConn
+		udpConn *net.UDPConn
+		tcpConn net.Conn
+	)
+	if creds.UseTCP {
+		// TCP control channel. pion/turn ships turn.NewSTUNConn to
+		// adapt a TCP connection into a net.PacketConn so the same
+		// client.Allocate flow works on either transport.
+		dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", turnAddr)
+		cancel()
+		if dialErr != nil {
+			return nil, fmt.Errorf("dial TURN TCP %s: %w", turnAddr, dialErr)
+		}
+		tcpConn = raw
+		conn = turn.NewSTUNConn(raw)
+	} else {
+		// UDP control channel. DialUDP so the OS picks a source port;
+		// connectedUDPConn ignores per-write destination since the
+		// underlying socket is already pinned to turnAddr. Matches
+		// anton48's connectedUDPConn pattern.
+		raw, dialErr := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "udp", turnAddr)
+		if dialErr != nil {
+			return nil, fmt.Errorf("dial TURN UDP %s: %w", turnAddr, dialErr)
+		}
+		uc, ok := raw.(*net.UDPConn)
+		if !ok {
+			_ = raw.Close()
+			return nil, fmt.Errorf("dial returned non-UDPConn %T", raw)
+		}
+		udpConn = uc
+		conn = &connectedUDPConn{UDPConn: uc, turnAddr: turnUDP}
 	}
 
 	cfg := &turn.ClientConfig{
 		STUNServerAddr: turnAddr,
 		TURNServerAddr: turnAddr,
-		// connectedUDPConn — DialUDP-style PacketConn that ignores
-		// the per-write destination since the underlying socket is
-		// already connected. pion/turn expects a net.PacketConn and
-		// happily uses the connected variant.
-		Conn:           &connectedUDPConn{UDPConn: udpConn, turnAddr: turnUDP},
+		Conn:           conn,
 		Username:       creds.Username,
 		Password:       creds.Password,
-		Realm:         "",
-		LoggerFactory: &logging.DefaultLoggerFactory{Writer: discardLogWriter{}},
+		Realm:          "",
+		LoggerFactory:  &logging.DefaultLoggerFactory{Writer: discardLogWriter{}},
+	}
+
+	closeUnderlay := func() {
+		if udpConn != nil {
+			_ = udpConn.Close()
+		}
+		if tcpConn != nil {
+			_ = tcpConn.Close()
+		}
 	}
 
 	client, err := turn.NewClient(cfg)
 	if err != nil {
-		_ = udpConn.Close()
+		closeUnderlay()
 		return nil, fmt.Errorf("turn.NewClient: %w", err)
 	}
 	if err := client.Listen(); err != nil {
 		client.Close()
-		_ = udpConn.Close()
+		closeUnderlay()
 		return nil, fmt.Errorf("turn client Listen: %w", err)
 	}
 
 	relayConn, err := client.Allocate()
 	if err != nil {
 		client.Close()
-		_ = udpConn.Close()
+		closeUnderlay()
 		return nil, fmt.Errorf("turn Allocate: %w", err)
 	}
 
@@ -145,9 +184,6 @@ func AllocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds TURNC
 	// fast (and to populate the relay's permission table before the
 	// DTLS handshake's first ClientHello).
 	if err := relayConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err == nil {
-		// Best-effort; some VK relays decline explicit CreatePermission
-		// and only honour implicit-via-WriteTo. We send a zero-length
-		// probe instead which always succeeds.
 		_, _ = relayConn.WriteTo([]byte{0}, peerUDP)
 	}
 
@@ -155,6 +191,7 @@ func AllocateTURN(ctx context.Context, turnAddr, peerAddrStr string, creds TURNC
 		client:   client,
 		relay:    relayConn,
 		udpConn:  udpConn,
+		tcpConn:  tcpConn,
 		peerAddr: peerUDP,
 	}, nil
 }

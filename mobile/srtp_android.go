@@ -146,7 +146,14 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 		numConns = 10
 	}
 
-	creds := wgclient.TURNCreds{Username: authRes.TurnUser, Password: authRes.TurnPass}
+	// Default to TCP control channel (anton48 build128+ default).
+	// Per-cred VK allocation-rate throttle is ~0% on TCP vs 36-58%
+	// on UDP. Honour UseUDPForTURN if the link / settings flipped it.
+	creds := wgclient.TURNCreds{
+		Username: authRes.TurnUser,
+		Password: authRes.TurnPass,
+		UseTCP:   !cfg.VKTurnSRTP.UseUDPForTURN,
+	}
 	var (
 		allocs    []*wgclient.TURNAllocation
 		srtpConns []net.Conn

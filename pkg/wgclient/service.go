@@ -173,6 +173,19 @@ type VKTurnSRTPParams struct {
 
 	// MTU for the WG interface. Zero → impl default (1280 for SRTP).
 	MTU int `json:"mtu,omitempty"`
+
+	// UseUDPForTURN forces the iOS↔TURN control channel onto UDP.
+	// Default false → TCP, which matches anton48 build128+ default
+	// and bypasses VK's per-credential allocation-rate throttle
+	// (introduced 2026-05-18): empirically ~0% quota-errors on TCP
+	// vs 36-58% on UDP for the same cred. Flip to true only if your
+	// network blocks or throttles TCP-to-relay and you'd rather take
+	// the allocation-rate hit than fail outright.
+	//
+	// Independent of the SRTP / DTLS+WG transport choice — this
+	// controls only the leg between the goloom client and the VK
+	// TURN node.
+	UseUDPForTURN bool `json:"use_udp_for_turn,omitempty"`
 }
 
 // WGParams is the embedded WireGuard config for the auto-WG path.
