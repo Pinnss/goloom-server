@@ -89,6 +89,42 @@ const (
 
 var probePingMagic = []byte{0xff, 'P', 'N', 'G'}
 
+// bindPktPool recycles per-packet byte buffers between readerLoop
+// (the producer that copies one packet's worth of bytes out of the
+// underlying wrappedConn.Read scratch buffer) and the WG-bound recv
+// closure (the consumer that copies into WG's destination slice and
+// is then done with the buffer). Backports anton48 build133 GC-pressure
+// fix to the goloom client side — same ~2400 pkts/s × ~5 MB/s of
+// allocations get recycled instead of churning the heap.
+//
+// Pool stores *[]byte pointers to avoid the per-Put interface-boxing
+// allocation that bare []byte values would incur.
+var bindPktPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
+func bindPktPoolGet(n int) []byte {
+	pp := bindPktPool.Get().(*[]byte)
+	p := *pp
+	if cap(p) < n {
+		p = make([]byte, n)
+	} else {
+		p = p[:n]
+	}
+	return p
+}
+
+func bindPktPoolPut(b []byte) {
+	if cap(b) < 2048 {
+		return
+	}
+	b = b[:0]
+	bindPktPool.Put(&b)
+}
+
 // NewSRTPBind takes ownership of conns — Close() will close them all.
 // Empty or nil slice is a programmer error. logger may be nil (silent
 // probe loop); usually you want to wire it to the session's *log.Logger.
@@ -149,6 +185,7 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 				return 0, net.ErrClosed
 			}
 			n := copy(packets[0], pkt.data)
+			bindPktPoolPut(pkt.data)
 			sizes[0] = n
 			eps[0] = srtpEndpoint{}
 			return 1, nil
@@ -176,11 +213,14 @@ func (b *SRTPBind) readerLoop(idx int, c net.Conn) {
 			continue // never deliver probe-echo to WG userspace
 		}
 		// Copy to a per-packet slice so the next Read can reuse buf.
-		pkt := make([]byte, n)
+		// Buffer is pulled from bindPktPool; recv closure Puts it back
+		// after copying out to WG's destination.
+		pkt := bindPktPoolGet(n)
 		copy(pkt, buf[:n])
 		select {
 		case b.rxCh <- rxPacket{data: pkt}:
 		case <-b.closed:
+			bindPktPoolPut(pkt)
 			return
 		}
 	}

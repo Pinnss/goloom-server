@@ -67,6 +67,52 @@ func IsDTLS(b byte) bool { return b >= 20 && b <= 63 }
 // packet (version-2 in top 2 bits → 128..191).
 func IsRTP(b byte) bool { return b >= 128 && b <= 191 }
 
+// pktPool recycles per-packet byte buffers used to hand demuxed
+// packets across goroutines (demux → dtlsCh / rtpCh → consumer).
+// Backports anton48 build133 fix that closed an iOS jetsam regression
+// caused by ~2400 packets/sec × ~5MB/sec of garbage under speedtest
+// load. We don't hit iOS jetsam on server/Android/Windows, but this
+// still cuts GC pressure on the hot RX path which is defensively good
+// (anton48 ships a matching pool in server/srtpwrap/srtp.go).
+//
+// Slices are stored as *[]byte to dodge the interface boxing
+// allocation sync.Pool would do for a bare []byte value.
+//
+// Lifecycle: demux/runDemux Get → send via channel → consumer Read or
+// ReadFrom Put when done. A leaked Get (channel closed mid-flight)
+// just GCs normally — sync.Pool tolerates non-paired Puts.
+var pktPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
+// pktPoolGet returns a buffer of length n with cap >= n. The buffer
+// is from the pool if a fitting one is available, else freshly
+// allocated.
+func pktPoolGet(n int) []byte {
+	pp := pktPool.Get().(*[]byte)
+	p := *pp
+	if cap(p) < n {
+		p = make([]byte, n)
+	} else {
+		p = p[:n]
+	}
+	return p
+}
+
+// pktPoolPut returns a buffer to the pool. Buffers smaller than the
+// default pool capacity are dropped on the floor — keeping the pool
+// holding only ≥2KB allocations preserves the "no copy at New" amortization.
+func pktPoolPut(b []byte) {
+	if cap(b) < 2048 {
+		return
+	}
+	b = b[:0]
+	pktPool.Put(&b)
+}
+
 // ─── Client ───────────────────────────────────────────────────────────────
 
 // Client performs a DTLS-SRTP handshake on top of an existing
@@ -250,21 +296,25 @@ func (s *Server) demux() {
 		} else {
 			s.mu.Unlock()
 		}
-		pkt := make([]byte, n)
+		pkt := pktPoolGet(n)
 		copy(pkt, buf[:n])
 		switch {
 		case IsDTLS(pkt[0]):
 			select {
 			case sess.dtlsCh <- pkt:
 			default:
+				pktPoolPut(pkt)
 				log.Printf("srtpwrap: dropped DTLS packet from %s (dtlsCh full)", src)
 			}
 		case IsRTP(pkt[0]):
 			select {
 			case sess.rtpCh <- pkt:
 			default:
+				pktPoolPut(pkt)
 				log.Printf("srtpwrap: dropped RTP packet from %s (rtpCh full)", src)
 			}
+		default:
+			pktPoolPut(pkt) // first-byte didn't match either family; recycle
 		}
 	}
 }
@@ -355,7 +405,9 @@ func (a *packetConnAdapter) ReadFrom(b []byte) (int, net.Addr, error) {
 			if !ok {
 				return 0, nil, net.ErrClosed
 			}
-			return copy(b, pkt), a.addr, nil
+			n := copy(b, pkt)
+			pktPoolPut(pkt)
+			return n, a.addr, nil
 		case <-a.closed:
 			return 0, nil, net.ErrClosed
 		case <-dl:
@@ -537,15 +589,19 @@ func (c *wrappedConn) Read(b []byte) (int, error) {
 			}
 			plain, err := c.decCtx.DecryptRTP(c.rxDecBuf[:0], pkt, nil)
 			if err != nil {
+				pktPoolPut(pkt)
 				continue
 			}
 			c.rxDecBuf = plain[:0]
 			var hdr rtp.Header
 			n, err := hdr.Unmarshal(plain)
 			if err != nil {
+				pktPoolPut(pkt)
 				continue
 			}
-			return copy(b, plain[n:]), nil
+			out := copy(b, plain[n:])
+			pktPoolPut(pkt)
+			return out, nil
 		case <-c.closed:
 			return 0, net.ErrClosed
 		case <-dl:
@@ -740,21 +796,25 @@ func runDemuxFromPacketConn(ctx context.Context, raw net.PacketConn, dtlsCh, rtp
 		if n == 0 {
 			continue
 		}
-		pkt := make([]byte, n)
+		pkt := pktPoolGet(n)
 		copy(pkt, buf[:n])
 		switch {
 		case IsDTLS(pkt[0]):
 			select {
 			case dtlsCh <- pkt:
 			case <-ctx.Done():
+				pktPoolPut(pkt)
 				return
 			}
 		case IsRTP(pkt[0]):
 			select {
 			case rtpCh <- pkt:
 			case <-ctx.Done():
+				pktPoolPut(pkt)
 				return
 			}
+		default:
+			pktPoolPut(pkt)
 		}
 	}
 }
