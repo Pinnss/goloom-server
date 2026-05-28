@@ -94,6 +94,14 @@ templ InboundForm() {
 			<input class="field-input" name="display_name"/>
 		</div>
 
+		<div x-show="transport === '' || transport === 'telemost'">
+			<label class="field-label">Pool size (1 = выкл, 2-10 = N паралл. участников комнаты)</label>
+			<input class="field-input" type="number" name="pool_size" min="1" max="20" value="1"/>
+			<p class="text-xs opacity-70">
+				Yandex Telemost режет каждого паблишера до ~3 Мбит/с. N участников от одного логического инбаунда даёт ~N×3 Мбит/с download. Клиент должен быть с тем же pool_size (передаётся в connection string).
+			</p>
+		</div>
+
 		<div x-data={ "{ auto: true }" }>
 			<label class="inline-flex items-center gap-2 text-sm">
 				<input type="checkbox" name="auto_provision" x-model="auto" checked/>

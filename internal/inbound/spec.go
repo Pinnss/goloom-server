@@ -25,6 +25,17 @@ type Spec struct {
 	// [github.com/Pinnss/goloom-server/internal/sfu].Kind.
 	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"`
 
+	// PoolSize, when >1, runs the SFU session inside an N-member pool —
+	// N parallel Telemost room participants share one logical inbound,
+	// each publishing on their own track. Yandex Telemost caps each
+	// publisher at ~3 Mbps, so N pool members give an ~N×3 Mbps download
+	// budget on the subscriber side. Only meaningful for SFU-family
+	// transports that tunnel through the SFU's media plane (currently
+	// only Telemost). 0 and 1 both fall back to legacy single-instance
+	// behaviour. Client side must match (encoded in the connection
+	// string as p=N).
+	PoolSize int `yaml:"pool_size,omitempty" json:"pool_size,omitempty"`
+
 	// LiveKit holds extra credentials for transport=livekit-wb-stream.
 	// Populated by the admin webview-auth flow; ignored otherwise.
 	LiveKit *LiveKitSpec `yaml:"livekit,omitempty" json:"livekit,omitempty"`

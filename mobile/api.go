@@ -353,7 +353,8 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 
 	cameraSender := tunnel.NewSender(sess.VideoTrack)
 	cameraSender.VP8Wrap = true
-	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
+	cameraSender.VP8Prefix = mediastubs.VP9BlackKeyframe
+	cameraSender.InterframePrefix = mediastubs.VP9InterframeHeader
 	cameraSender.Start()
 
 	c.emitPhase("handshake", "exchanging HELLO with peer")

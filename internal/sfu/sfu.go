@@ -76,6 +76,14 @@ type ConnectSpec struct {
 	DisplayName string
 	Logger      *log.Logger
 
+	// Side identifies the pool side this session belongs to. Transports
+	// that wrap WG payload through a tunnel layer (currently Telemost)
+	// use this to stamp the side flag on outbound frames and drop
+	// same-side frames on inbound. Allowed values: "server", "client",
+	// "" (no side — single-instance legacy behaviour). See
+	// [internal/sfu/sfupool] for the pool architecture rationale.
+	Side string
+
 	// Telemost is set when Kind == KindTelemost.
 	Telemost *TelemostConnect
 

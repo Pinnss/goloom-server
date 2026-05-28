@@ -28,6 +28,13 @@ type Params struct {
 	// Клиент должен совпадать с серверным codec'ом инбаунда.
 	Codec string `json:"c,omitempty"`
 
+	// PoolSize, when >1, opens N parallel SFU sessions per logical
+	// connection. Used by the Telemost SFU pool architecture to fan out
+	// across multiple room participants and aggregate the per-publisher
+	// bandwidth cap. Must match the server-side inbound's pool_size for
+	// side-filtered handshake to find a peer. 0/1 → legacy single-instance.
+	PoolSize int `json:"p,omitempty"`
+
 	// WG-related fields. Populated by the admin panel when an inbound
 	// has been auto-provisioned, so the client can build its WG config
 	// from a single connection string instead of having the user copy a

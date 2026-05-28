@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,6 +147,11 @@ type createInboundReq struct {
 	// from the provisioner pool. If false, WGEndpoint must be supplied.
 	AutoProvision bool   `json:"auto_provision"`
 	WGEndpoint    string `json:"wg_endpoint"`
+
+	// PoolSize, when >1, enables the SFU pool architecture for Telemost
+	// inbounds — N parallel room participants per logical inbound to
+	// aggregate around the per-publisher bandwidth cap.
+	PoolSize int `json:"pool_size"`
 }
 
 func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +180,7 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 		Tag:         req.Tag,
 		Meeting:     req.Meeting,
 		DisplayName: req.DisplayName,
+		PoolSize:    req.PoolSize,
 		Enabled:     true,
 		CreatedAt:   time.Now().UTC(),
 	}
@@ -447,6 +454,7 @@ func buildConnStr(spec inbound.Spec, publicAdminURL string) (string, error) {
 		Meeting:   spec.Meeting,
 		Tag:       spec.Tag,
 		Transport: spec.Transport, // empty stays empty (== telemost default)
+		PoolSize:  spec.PoolSize,  // 0 stays 0 (== legacy single-instance)
 	}
 	// VK Calls ships its own MeetingURL in the per-transport sub-spec —
 	// the generic Spec.Meeting may be empty when the operator typed the
@@ -510,6 +518,7 @@ func decodeCreateInboundRequest(r *http.Request) (createInboundReq, error) {
 	if err := r.ParseForm(); err != nil {
 		return createInboundReq{}, err
 	}
+	poolSize, _ := strconv.Atoi(strings.TrimSpace(r.PostFormValue("pool_size")))
 	return createInboundReq{
 		Tag:              strings.TrimSpace(r.PostFormValue("tag")),
 		Meeting:          strings.TrimSpace(r.PostFormValue("meeting")),
@@ -521,6 +530,7 @@ func decodeCreateInboundRequest(r *http.Request) (createInboundReq, error) {
 		VKTurnUseWrap:    parseBool(r.PostFormValue("vk_turn_use_wrap")),
 		AutoProvision:    parseBool(r.PostFormValue("auto_provision")),
 		WGEndpoint:       strings.TrimSpace(r.PostFormValue("wg_endpoint")),
+		PoolSize:         poolSize,
 	}, nil
 }
 

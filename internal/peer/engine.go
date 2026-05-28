@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Pinnss/goloom-server/internal/goloom"
@@ -33,10 +34,15 @@ func BuildAPI() (*webrtc.API, error) {
 		return nil, err
 	}
 
+	// VP9 with profile-id=0 (8-bit 4:2:0). 2026-05-27 — migrated from
+	// VP8 PT 96 to fight Yandex Telemost shaping that classifies plain
+	// VP8 publishers as low-end webcams (~3 Mbps cap). VP9 is the modern
+	// codec the SFU prefers; declaring it may grant higher bitrate budget.
 	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeVP8,
-			ClockRate: 90000,
+			MimeType:    webrtc.MimeTypeVP9,
+			ClockRate:   90000,
+			SDPFmtpLine: "profile-id=0",
 			RTCPFeedback: []webrtc.RTCPFeedback{
 				{Type: "goog-remb"},
 				{Type: "transport-cc"},
@@ -45,12 +51,29 @@ func BuildAPI() (*webrtc.API, error) {
 				{Type: "nack", Parameter: "pli"},
 			},
 		},
-		PayloadType: 96,
+		PayloadType: 98,
 	}, webrtc.RTPCodecTypeVideo); err != nil {
 		return nil, err
 	}
 
-	return webrtc.NewAPI(webrtc.WithMediaEngine(me)), nil
+	// 2026-05-28 — register the transport-cc (TWCC) header-extension sender.
+	// Real WebRTC clients stamp every RTP packet with a transport-wide
+	// sequence number so the remote can generate TWCC feedback. Without it
+	// our packets lack the extension that the SFU's answer advertises
+	// (a=extmap:N transport-cc) — a strong "not a real WebRTC source" DPI
+	// signal. ConfigureTWCCHeaderExtensionSender registers the extmap on
+	// both audio + video and adds an interceptor that injects monotonic
+	// sequence numbers on egress. Pairs with the keyframe-ratio fix to make
+	// the flow indistinguishable from a genuine Yandex SDK publisher.
+	ir := &interceptor.Registry{}
+	if err := webrtc.ConfigureTWCCHeaderExtensionSender(me, ir); err != nil {
+		return nil, err
+	}
+
+	return webrtc.NewAPI(
+		webrtc.WithMediaEngine(me),
+		webrtc.WithInterceptorRegistry(ir),
+	), nil
 }
 
 // ToConfig converts the goloom-supplied ice_servers list into a Pion

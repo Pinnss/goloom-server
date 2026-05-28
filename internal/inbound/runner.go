@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/relay"
 	"github.com/Pinnss/goloom-server/internal/sfu"
+	"github.com/Pinnss/goloom-server/internal/sfu/sfupool"
 
 	// Side-effect imports — register Telemost / LiveKit / VK Calls
 	// Transports with the sfu factory. Pulled in here so
@@ -181,8 +182,20 @@ func (r *Runner) runSFU(ctx context.Context) error {
 	}
 
 	r.setPhase("waiting_for_client")
-	r.Logger.Printf("connecting via transport=%s", connectSpec.Kind)
-	sess, err := transport.Connect(ctx, connectSpec)
+	poolSize := r.Spec.PoolSize
+	if poolSize <= 1 {
+		r.Logger.Printf("connecting via transport=%s", connectSpec.Kind)
+	} else {
+		r.Logger.Printf("connecting via transport=%s pool_size=%d (server side)", connectSpec.Kind, poolSize)
+	}
+	connectSpec.Side = "server"
+
+	var sess sfu.Session
+	if poolSize > 1 {
+		sess, err = sfupool.Connect(ctx, transport, connectSpec, poolSize, r.Logger)
+	} else {
+		sess, err = transport.Connect(ctx, connectSpec)
+	}
 	if err != nil {
 		// Empty-room handshake timeout from Telemost is normal until a
 		// real client joins — surface as "waiting_for_client" rather
@@ -199,7 +212,7 @@ func (r *Runner) runSFU(ctx context.Context) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer sess.Close()
-	r.Logger.Printf("session ready")
+	r.Logger.Printf("session ready (pool_size=%d)", max(1, poolSize))
 
 	bridge := wgrelay.NewServerBridge(r.Spec.WGEndpoint, sess, r.Logger)
 	r.bridge.Store(bridge)

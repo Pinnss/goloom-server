@@ -13,22 +13,38 @@ var DefaultCapabilitiesOffer = map[string][]string{
 	"offerAnswerMode":                       {"SEPARATE"},
 	"initialSubscriberOffer":                {"ON_HELLO"},
 	"slotsMode":                             {"FROM_CONTROLLER"},
-	"simulcastMode":                         {"DISABLED", "STATIC"},
+	// Force DISABLED — when we removed VP9/SVC, SFU defaulted to STATIC
+	// here. STATIC simulcast expects 3 layered tracks; we publish 1.
+	// Mismatch likely worsens forwarding decisions.
+	"simulcastMode":                         {"DISABLED"},
 	"selfVadStatus":                         {"FROM_SERVER", "FROM_CLIENT"},
 	"dataChannelSharing":                    {"TO_RTP"},
 	"videoEncoderConfig":                    {"NO_CONFIG", "ONLY_INIT_CONFIG", "RUNTIME_CONFIG"},
-	"dataChannelVideoCodec":                 {"VP8", "UNIQUE_CODEC_FROM_TRACK_DESCRIPTION"},
-	"bandwidthLimitationReason":             {"BANDWIDTH_REASON_DISABLED", "BANDWIDTH_REASON_ENABLED"},
+	// We now publish VP9 (PT 98) — see [internal/peer/engine.go] BuildAPI.
+	"dataChannelVideoCodec":                 {"VP9", "UNIQUE_CODEC_FROM_TRACK_DESCRIPTION"},
+	// Single-value offer forces SFU to pick "DISABLED" — i.e. don't engage
+	// per-participant bandwidth limitation logic. Original offer included
+	// "BANDWIDTH_REASON_ENABLED"; SFU chose ENABLED and capped us at ~3
+	// Mbps. 2026-05-27 — see [internal/session/session.go] STAGE4 log.
+	"bandwidthLimitationReason":             {"BANDWIDTH_REASON_DISABLED"},
 	"sdkDefaultDeviceManagement":            {"SDK_DEFAULT_DEVICE_MANAGEMENT_DISABLED", "SDK_DEFAULT_DEVICE_MANAGEMENT_ENABLED"},
 	"joinOrderLayout":                       {"JOIN_ORDER_LAYOUT_DISABLED", "JOIN_ORDER_LAYOUT_ENABLED"},
 	"pinLayout":                             {"PIN_LAYOUT_DISABLED"},
 	"sendSelfViewVideoSlot":                 {"SEND_SELF_VIEW_VIDEO_SLOT_DISABLED", "SEND_SELF_VIEW_VIDEO_SLOT_ENABLED"},
 	"serverLayoutTransition":                {"SERVER_LAYOUT_TRANSITION_DISABLED"},
-	"sdkPublisherOptimizeBitrate":           {"SDK_PUBLISHER_OPTIMIZE_BITRATE_DISABLED", "SDK_PUBLISHER_OPTIMIZE_BITRATE_FULL", "SDK_PUBLISHER_OPTIMIZE_BITRATE_ONLY_SELF"},
+	// Single-value offer forces "DISABLED" — i.e. ask the SDK not to
+	// auto-optimize (read: reduce) the publisher bitrate based on
+	// REMB/TWCC. SFU previously chose FULL on the multi-option offer,
+	// which is the strongest possible bitrate-clamping mode.
+	"sdkPublisherOptimizeBitrate":           {"SDK_PUBLISHER_OPTIMIZE_BITRATE_DISABLED"},
 	"sdkNetworkLostDetection":               {"SDK_NETWORK_LOST_DETECTION_DISABLED"},
 	"sdkNetworkPathMonitor":                 {"SDK_NETWORK_PATH_MONITOR_DISABLED"},
-	"publisherVp9":                          {"PUBLISH_VP9_DISABLED", "PUBLISH_VP9_ENABLED"},
-	"svcMode":                               {"SVC_MODE_DISABLED", "SVC_MODE_L3T3", "SVC_MODE_L3T3_KEY"},
+	// We publish plain VP9 (no SVC layers). Force ENABLED for publisherVp9
+	// to truthfully signal the codec, but keep svcMode at DISABLED so the
+	// SFU doesn't try to slice us into spatial/temporal layers it won't
+	// find (we publish one flat VP9 stream).
+	"publisherVp9":                          {"PUBLISH_VP9_ENABLED"},
+	"svcMode":                               {"SVC_MODE_DISABLED"},
 	"subscriberOfferAsyncAck":               {"SUBSCRIBER_OFFER_ASYNC_ACK_DISABLED", "SUBSCRIBER_OFFER_ASYNC_ACK_ENABLED"},
 	"androidBluetoothRoutingFix":            {"ANDROID_BLUETOOTH_ROUTING_FIX_DISABLED"},
 	"fixedIceCandidatesPoolSize":            {"FIXED_ICE_CANDIDATES_POOL_SIZE_DISABLED"},

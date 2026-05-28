@@ -196,6 +196,11 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 		len(s.srvHello.RtcConfiguration.ICEServers),
 		s.srvHello.PingPongConfiguration.PingInterval,
 		s.srvHello.TelemetryConfiguration.SendingInterval)
+	// Phase 1.5 — log capabilitiesAnswer to investigate Telemost shaping.
+	// The SFU picks one option per key from our CapabilitiesOffer; the chosen
+	// values control bandwidth-limitation, optimize-bitrate, SVC mode, etc.
+	// 2026-05-27: investigating why our 30 Mbps transport got capped to ~3 Mbps.
+	lg.Printf("STAGE4 capabilitiesAnswer: %+v", s.srvHello.CapabilitiesAnswer)
 	s.Client.ConfigurePeriodicTasks(ctx, s.srvHello.PingPongConfiguration, s.srvHello.TelemetryConfiguration)
 
 	// Stage 5 — build PCs, publisher offer
@@ -236,7 +241,7 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 	}
 
 	s.VideoTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9},
 		"video0", "fake-stream",
 	)
 	if err != nil {
@@ -255,13 +260,18 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 	if err := s.Pub.PC.SetLocalDescription(offer); err != nil {
 		return nil, fmt.Errorf("set local pub: %w", err)
 	}
+	// Declare 30 Mbps for our video publisher. Without this Telemost defaults
+	// to ~3 Mbps regardless of capabilitiesOffer (which only controls SDK
+	// behaviour, not SFU forwarding caps). 2026-05-27 — see [helpers.go]
+	// InjectBandwidthAttribute doc.
+	mungedSDP := InjectBandwidthAttribute(offer.SDP, "video", 30000)
 	pubTracks := buildPublisherTracks(s.Pub.PC)
 	if err := s.Client.Send(goloom.Envelope{
-		PublisherSdpOffer: &goloom.PublisherSdpOffer{PcSeq: 1, SDP: offer.SDP, Tracks: pubTracks},
+		PublisherSdpOffer: &goloom.PublisherSdpOffer{PcSeq: 1, SDP: mungedSDP, Tracks: pubTracks},
 	}); err != nil {
 		return nil, fmt.Errorf("send pub offer: %w", err)
 	}
-	lg.Printf("STAGE5 ✓ PUB offer sent (sdp=%d tracks=%d)", len(offer.SDP), len(pubTracks))
+	lg.Printf("STAGE5 ✓ PUB offer sent (sdp=%d tracks=%d, b=AS:30000)", len(mungedSDP), len(pubTracks))
 
 	// SUB handlers
 	s.Sub.PC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -371,9 +381,18 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 	lg.Printf("STAGE6 ✓ both PCs connected")
 
 	// Initial setSlots: ask SFU to actually push us peer video.
+	// Declare 4K/FHD slot sizes — Yandex Telemost appears to use slot
+	// dimensions as a hint for per-participant bandwidth allocation.
+	// 2026-05-27 — previous 640x480 advertised "low-end webcam" budget
+	// (~3 Mbps). 4K hints "presentation/screen-share" budget (~30 Mbps).
 	slots := make([]goloom.SlotSize, 12)
-	slots[0] = goloom.SlotSize{Width: 640, Height: 480}
-	slots[1] = goloom.SlotSize{Width: 320, Height: 240}
+	slots[0] = goloom.SlotSize{Width: 3840, Height: 2160}
+	slots[1] = goloom.SlotSize{Width: 1920, Height: 1080}
+	// 2026-05-27 — populate the rest so SFU forwards tracks from every
+	// room participant when an inbound runs with pool_size > 2.
+	for i := 2; i < 12; i++ {
+		slots[i] = goloom.SlotSize{Width: 1920, Height: 1080}
+	}
 	if err := s.Client.Send(goloom.Envelope{
 		SetSlots: &goloom.SetSlots{
 			Slots:              slots,
@@ -386,7 +405,7 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 	}); err != nil {
 		return nil, fmt.Errorf("setSlots: %w", err)
 	}
-	lg.Printf("STAGE6.7 ✓ setSlots sent (slot[0]=640x480 slot[1]=320x240, key=2)")
+	lg.Printf("STAGE6.7 ✓ setSlots sent (slot[0]=3840x2160 slot[1]=1920x1080, key=2)")
 
 	go s.runSubRenegotiationLoop(ctx)
 	lg.Printf("SUB-RENEGO loop started — will process subsequent subscriberSdpOffers")
@@ -446,8 +465,11 @@ func (s *Session) runSubRenegotiationLoop(ctx context.Context) {
 
 			slotKey++
 			slots := make([]goloom.SlotSize, 12)
-			slots[0] = goloom.SlotSize{Width: 1280, Height: 720}
-			slots[1] = goloom.SlotSize{Width: 320, Height: 240}
+			slots[0] = goloom.SlotSize{Width: 3840, Height: 2160}
+			slots[1] = goloom.SlotSize{Width: 1920, Height: 1080}
+			for i := 2; i < 12; i++ {
+				slots[i] = goloom.SlotSize{Width: 1920, Height: 1080}
+			}
 			if err := s.Client.Send(goloom.Envelope{
 				SetSlots: &goloom.SetSlots{
 					Slots:              slots,
@@ -460,7 +482,7 @@ func (s *Session) runSubRenegotiationLoop(ctx context.Context) {
 			}); err != nil {
 				s.Logger.Printf("SUB-RENEGO setSlots err: %v", err)
 			} else {
-				s.Logger.Printf("SUB-RENEGO ✓ setSlots re-sent (key=%d) to refresh binding", slotKey)
+				s.Logger.Printf("SUB-RENEGO ✓ setSlots re-sent (key=%d, 4K/FHD) to refresh binding", slotKey)
 			}
 		}
 	}
@@ -781,7 +803,7 @@ func (s *Session) SetupScreenShare(ctx context.Context) error {
 		return fmt.Errorf("display-audio xcvr: %w", err)
 	}
 	s.DisplayVideoTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9},
 		"display-video0", "screen-stream",
 	)
 	if err != nil {
@@ -837,10 +859,13 @@ func (s *Session) SetupScreenShare(ctx context.Context) error {
 	// Updated setSlots — WithSelfView=false so SFU doesn't reserve slot[0]
 	// for our own self-view; we want it free for peer's screen-share. The
 	// big size in slot[0] hints SFU to forward at hi-res (we want bandwidth
-	// for tunnel data).
+	// for tunnel data). 4K/FHD declares us as ultra-premium video consumer.
 	slots := make([]goloom.SlotSize, 12)
-	slots[0] = goloom.SlotSize{Width: 1280, Height: 720}
-	slots[1] = goloom.SlotSize{Width: 320, Height: 240}
+	slots[0] = goloom.SlotSize{Width: 3840, Height: 2160}
+	slots[1] = goloom.SlotSize{Width: 1920, Height: 1080}
+	for i := 2; i < 12; i++ {
+		slots[i] = goloom.SlotSize{Width: 1920, Height: 1080}
+	}
 	if err := s.Client.Send(goloom.Envelope{
 		SetSlots: &goloom.SetSlots{
 			Slots:              slots,
@@ -853,7 +878,7 @@ func (s *Session) SetupScreenShare(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("send setSlots key=3: %w", err)
 	}
-	s.Logger.Printf("STAGE7 ✓ setSlots sent (key=3, slot[0]=1280x720 slot[1]=320x240, WithSelfView=false)")
+	s.Logger.Printf("STAGE7 ✓ setSlots sent (key=3, slot[0]=3840x2160 slot[1]=1920x1080, WithSelfView=false)")
 
 	return nil
 }
@@ -864,8 +889,11 @@ func (s *Session) SetupScreenShare(ctx context.Context) error {
 // participant binding to whoever was active when its setSlots first arrived).
 func (s *Session) RebindSlots(ctx context.Context, key int) error {
 	slots := make([]goloom.SlotSize, 12)
-	slots[0] = goloom.SlotSize{Width: 1280, Height: 720}
-	slots[1] = goloom.SlotSize{Width: 320, Height: 240}
+	slots[0] = goloom.SlotSize{Width: 3840, Height: 2160}
+	slots[1] = goloom.SlotSize{Width: 1920, Height: 1080}
+	for i := 2; i < 12; i++ {
+		slots[i] = goloom.SlotSize{Width: 1920, Height: 1080}
+	}
 	if err := s.Client.Send(goloom.Envelope{
 		SetSlots: &goloom.SetSlots{
 			Slots:              slots,

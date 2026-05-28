@@ -58,6 +58,28 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	displayName := identity.NameOrGenerate(spec.DisplayName)
 	lg := spec.Logger
 
+	// Resolve side filtering for the pool architecture. "server" stamps
+	// outbound frames with FlagFromServer and drops inbound frames bearing
+	// it (same-side cross-talk). "client" inverts: stamps nothing on
+	// outbound, drops inbound frames WITHOUT FlagFromServer set. "" (the
+	// legacy single-instance default) disables filtering on both sides.
+	var sendSideFlag, dropSideFlag tunnel.Flags
+	switch spec.Side {
+	case "server":
+		sendSideFlag = tunnel.FlagFromServer
+		dropSideFlag = tunnel.FlagFromServer
+	case "client":
+		sendSideFlag = 0
+		// Client receivers drop frames that DON'T have FlagFromServer set;
+		// we encode that as DropFlag=FlagFromServer with negation handled
+		// at the Receiver layer via [Receiver.DropFlag] semantics. Since
+		// our current Receiver does positive-match drop, the client side
+		// uses 0 here — bot-to-bot cross-talk on the client side only
+		// hurts if there are multiple client bots (out of scope for the
+		// initial server-pool deployment).
+		dropSideFlag = 0
+	}
+
 	sess, err := session.SetupSession(ctx, lg, spec.Telemost.MeetingURL, displayName)
 	if err != nil {
 		return nil, fmt.Errorf("telemost: SetupSession: %w", err)
@@ -80,7 +102,7 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	}
 
 	merged := make(chan tunnel.ReceivedFrame, 512)
-	go pumpVideoTracks(ctx, lg, sess, merged)
+	go pumpVideoTracks(ctx, lg, sess, merged, dropSideFlag)
 
 	// Wait for the remote peer to appear and complete the in-band
 	// HELLO/HELLO_ACK exchange. Failures here propagate to the caller
@@ -91,7 +113,9 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 
 	cameraSender := tunnel.NewSender(sess.VideoTrack)
 	cameraSender.VP8Wrap = true
-	cameraSender.VP8Prefix = mediastubs.VP8BlackKeyframe
+	cameraSender.VP8Prefix = mediastubs.VP9BlackKeyframe
+	cameraSender.InterframePrefix = mediastubs.VP9InterframeHeader
+	cameraSender.SideFlag = sendSideFlag
 	cameraSender.Start()
 
 	peerID, err := session.Handshake(ctx, lg, sess, cameraSender, merged, 1)
@@ -143,8 +167,10 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 
 // pumpVideoTracks subscribes to every fresh remote video track and feeds
 // its decoded frames into `merged`. Lifted verbatim from runner.go and
-// the desktop client.
-func pumpVideoTracks(ctx context.Context, lg *log.Logger, sess *session.Session, merged chan<- tunnel.ReceivedFrame) {
+// the desktop client. dropSideFlag, if non-zero, makes each receiver
+// silently drop frames stamped with that flag — used by SFU pool
+// members to ignore other same-side pool members' broadcast frames.
+func pumpVideoTracks(ctx context.Context, lg *log.Logger, sess *session.Session, merged chan<- tunnel.ReceivedFrame, dropSideFlag tunnel.Flags) {
 	idx := 0
 	for {
 		select {
@@ -156,6 +182,7 @@ func pumpVideoTracks(ctx context.Context, lg *log.Logger, sess *session.Session,
 			}
 			idx++
 			rcv := tunnel.NewReceiver(256)
+			rcv.DropFlag = dropSideFlag
 			go rcv.Run(ctx, tr, lg)
 			go func(recv *tunnel.Receiver) {
 				for f := range recv.Frames() {

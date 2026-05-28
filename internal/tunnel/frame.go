@@ -47,6 +47,19 @@ const (
 	FlagPing         Flags = 1 << 3 // initiator → echoer; payload[:4]=ping msgID, then data
 	FlagPong         Flags = 1 << 4 // echoer → initiator; payload echoed verbatim
 	FlagKCP          Flags = 1 << 5 // KCP reliable transport datagram
+
+	// FlagFromServer marks frames published by the server-side endpoint
+	// (or any of its N pool participants). The receiver side filters by
+	// this flag to avoid bot-to-bot cross-talk loops when multiple server
+	// participants share a Telemost room: server bot J receives server bot
+	// K's track via the SFU broadcast, but must NOT process those frames
+	// as if they came from the client. Same logic mirrored on the client
+	// pool side — client bots drop frames WITHOUT this flag (own side).
+	//
+	// 2026-05-27 — added for the SFU pool architecture; backward-compatible
+	// with single-instance peers since 0 has been the legacy default and
+	// both Sender.SideFlag and Receiver.DropFlag default to 0 (no filtering).
+	FlagFromServer Flags = 1 << 6
 )
 
 // Has reports whether all the bits set in other are also set in f.

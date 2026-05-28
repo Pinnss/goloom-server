@@ -111,15 +111,16 @@ func (t *DataTunnel) Run(ctx context.Context) {
 				return
 			}
 			// A FlagHandshake/FlagHandshakeAck frame after we've started
-			// relaying means our peer just restarted (fresh server
-			// instance, or client reconnected). Tear down so the
-			// supervisor restarts both Sender state and any WG session.
+			// relaying USED to mean "peer restarted, tear down for fresh
+			// session". But in pool mode the client's merged channel
+			// receives N HELLOs + N HELLO_ACKs from N server pool members
+			// during the handshake, while [session.Handshake] only consumes
+			// 1 of each. The leftovers land here and trigger spurious
+			// teardown loops. 2026-05-27: silently ignore handshake frames
+			// post-handshake; rx-stall watchdog already catches genuinely
+			// dead sessions via a 2-minute no-traffic timeout.
 			if f.Flags.Has(tunnel.FlagHandshake) || f.Flags.Has(tunnel.FlagHandshakeAck) {
-				t.mu.Lock()
-				t.rehandshake = true
-				t.mu.Unlock()
-				t.logger.Printf("DT: peer initiated re-handshake — tearing down for fresh session")
-				return
+				continue
 			}
 			if !f.Flags.Has(FlagWGData) {
 				continue

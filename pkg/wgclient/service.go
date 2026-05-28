@@ -42,6 +42,7 @@ import (
 	"github.com/Pinnss/goloom-server/internal/connstr"
 	"github.com/Pinnss/goloom-server/internal/identity"
 	"github.com/Pinnss/goloom-server/internal/sfu"
+	"github.com/Pinnss/goloom-server/internal/sfu/sfupool"
 
 	// Side-effect imports — register transports with the sfu registry.
 	_ "github.com/Pinnss/goloom-server/internal/sfu/livekit"
@@ -147,6 +148,16 @@ type Config struct {
 	// vkturnproxy:// link. Honoured only when Transport=="vk-turn-srtp"
 	// (or "vk-turn" for the legacy path); ignored otherwise.
 	VKTurnSRTP VKTurnSRTPParams `json:"vk_turn_srtp,omitzero"`
+
+	// PoolSize, when >1, opens N parallel SFU sessions for one logical
+	// connection. Each session joins the Telemost room as a separate
+	// participant, and outbound WG datagrams are round-robin'd across
+	// them. Yandex Telemost caps each publisher at ~3 Mbps, so N sessions
+	// gives roughly N×3 Mbps aggregate. Server-side PoolSize must match
+	// for the side-filter handshake to find a peer; mismatch isn't fatal
+	// but wastes participants. Only meaningful for SFU-family transports.
+	// 0 or 1 → legacy single-instance behaviour.
+	PoolSize int `json:"pool_size,omitempty"`
 }
 
 // VKTurnSRTPParams is the per-session knob set for the vk-turn /
@@ -235,6 +246,7 @@ func FromConnStr(s string) (Config, error) {
 		DisplayName:  p.DisplayName,
 		ListenAddr:   "127.0.0.1:51820",
 		VKCallsCodec: p.Codec,
+		PoolSize:     p.PoolSize,
 	}
 	// VK Calls clients are the call originator by convention.
 	if transport == "vk-calls" {
@@ -678,7 +690,15 @@ func (s *Service) runOnce(ctx context.Context, cfg Config, rm *tun.RouteManager)
 	}
 
 
-	sess, err := transport.Connect(ctx, connectSpec)
+	connectSpec.Side = "client"
+
+	var sess sfu.Session
+	if cfg.PoolSize > 1 {
+		lg.Printf("connecting via pool_size=%d (client side)", cfg.PoolSize)
+		sess, err = sfupool.Connect(ctx, transport, connectSpec, cfg.PoolSize, lg)
+	} else {
+		sess, err = transport.Connect(ctx, connectSpec)
+	}
 	if err != nil {
 		return err
 	}
