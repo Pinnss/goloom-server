@@ -35,6 +35,10 @@ import (
 // auth и для captchaNotRobot разные, и реальные браузеры могут менять
 // UA посередине сессии (расширения, обновления). При желании — можно
 // прокинуть один профиль через AuthSpec.Profile в S1c-polish.
+// autoSolve — точка инъекции для тестов; в проде это [SolveCaptchaV2]
+// (реальный сетевой replay через VK API).
+var autoSolve = SolveCaptchaV2
+
 func WithReplaySolver(store *ProfileStore, base sfu.VKCaptchaSolver, lg *log.Logger) sfu.VKCaptchaSolver {
 	if store == nil {
 		return base
@@ -51,7 +55,7 @@ func WithReplaySolver(store *ProfileStore, base sfu.VKCaptchaSolver, lg *log.Log
 			lg.Printf("vkcalls/captcha-replay: trying profile %s (success=%d fail=%d ua=%s)",
 				picked.ID, picked.Successes, picked.Failures, shortUA(picked.UserAgent))
 		}
-		token, err := SolveCaptchaV2(ctx, ch, PickProfile(), picked, lg)
+		token, err := autoSolve(ctx, ch, PickProfile(), picked, lg)
 		if err == nil {
 			store.MarkSuccess(picked.ID)
 			if lg != nil {
@@ -72,6 +76,29 @@ func WithReplaySolver(store *ProfileStore, base sfu.VKCaptchaSolver, lg *log.Log
 		if ctx.Err() != nil {
 			return sfu.VKCaptchaSolution{}, ctx.Err()
 		}
-		return base(ctx, ch)
+
+		// SolveCaptchaV2 уже израсходовал session_token оригинального
+		// challenge'а (settings/componentDone/check/endSession). VK на
+		// потраченную сессию отдаёт пустую captcha-страницу, поэтому
+		// интерактивный fallback ОБЯЗАН решать СВЕЖИЙ challenge, а не
+		// тот что мы только что сожгли (иначе — белый экран в WebView).
+		manualCh := ch
+		if ch.Refresh != nil {
+			if fresh, rerr := ch.Refresh(ctx); rerr == nil {
+				manualCh = fresh
+				if lg != nil {
+					lg.Printf("vkcalls/captcha-replay: minted fresh challenge for interactive fallback (sid=%s)", fresh.Sid)
+				}
+			} else if lg != nil {
+				lg.Printf("vkcalls/captcha-replay: challenge refresh failed (%v); interactive solver may hit a spent session", rerr)
+			}
+		}
+		sol, serr := base(ctx, manualCh)
+		// Сообщаем auth-ладдеру, какому challenge'у принадлежит токен,
+		// чтобы replay бил по обновлённой сессии, а не по оригинальной.
+		if serr == nil && sol.Sid == "" {
+			sol.Sid, sol.Ts, sol.Attempt = manualCh.Sid, manualCh.Ts, manualCh.Attempt
+		}
+		return sol, serr
 	}
 }

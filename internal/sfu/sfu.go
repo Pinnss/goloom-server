@@ -189,14 +189,31 @@ type VKCaptchaChallenge struct {
 	Attempt      string
 	RedirectURI  string
 	SessionToken string
+
+	// Refresh, if non-nil, mints a brand-new challenge (fresh
+	// session_token/sid) by re-invoking VK's getAnonymousToken. A
+	// composite solver MUST call this before an interactive fallback
+	// when an earlier auto attempt has already spent the original
+	// session: VK serves a blank captcha page for a consumed
+	// session_token, so reusing it strands the user on a white screen.
+	Refresh func(context.Context) (VKCaptchaChallenge, error)
 }
 
 // VKCaptchaSolution is what the solver returns once the user has
 // passed the challenge. SuccessToken is what gets re-sent on the
 // next anonymous-login attempt (within ~minutes — tokens expire
 // fast).
+//
+// Sid/Ts/Attempt identify the challenge the token was actually issued
+// for. A composite solver may solve a *different* (refreshed) challenge
+// than the one passed in (see [VKCaptchaChallenge.Refresh]); the auth
+// ladder must replay with these, not the original challenge's values.
+// Zero values mean "same as the input challenge".
 type VKCaptchaSolution struct {
 	SuccessToken string
+	Sid          string
+	Ts           float64
+	Attempt      string
 }
 
 // Validate returns nil if the spec is internally consistent, else a

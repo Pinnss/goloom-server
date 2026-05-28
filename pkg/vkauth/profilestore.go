@@ -42,6 +42,12 @@ type CapturedProfile struct {
 	LastUsedAt time.Time `json:"last_used_at,omitempty"`
 	Successes  int       `json:"successes"`
 	Failures   int       `json:"failures"`
+	// ConsecutiveFails — фейлы подряд с момента последнего успеха
+	// (сбрасывается в 0 на MarkSuccess). Это и есть «подряд» для
+	// DropAfterFailures: профиль с большой историей успехов, который VK
+	// внезапно забанил, должен вылетать через N фейлов подряд, а не
+	// ждать пока Failures догонит Successes.
+	ConsecutiveFails int `json:"consecutive_fails,omitempty"`
 }
 
 // ProfileStore — пул CapturedProfile с persistence.
@@ -172,6 +178,12 @@ func (s *ProfileStore) Pick() *CapturedProfile {
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
+		// Сначала по фейлам подряд: профиль, только что фейлнувший
+		// live-captcha (ConsecutiveFails>0), должен уступать свежему
+		// захваченному (0), даже если у него отличная история успехов.
+		if candidates[i].ConsecutiveFails != candidates[j].ConsecutiveFails {
+			return candidates[i].ConsecutiveFails < candidates[j].ConsecutiveFails
+		}
 		ai := candidates[i].Failures - candidates[i].Successes
 		aj := candidates[j].Failures - candidates[j].Successes
 		if ai != aj {
@@ -192,15 +204,17 @@ func (s *ProfileStore) MarkSuccess(id string) {
 	if p := s.findLocked(id); p != nil {
 		p.LastUsedAt = time.Now()
 		p.Successes++
+		p.ConsecutiveFails = 0
 		s.persistLocked()
 	}
 }
 
-// MarkFail отмечает captcha-fail. После dropAfterFailures подряд —
-// удаляем профиль из пула (бесполезен, VK его уже flag'нул).
-//
-// «Подряд» считаем грубо: если Failures >= dropAfterFailures и
-// Failures > Successes (т.е. ratio плохой), выкидываем.
+// MarkFail отмечает captcha-fail. После dropAfterFailures фейлов
+// ПОДРЯД (без успеха между ними) — удаляем профиль из пула: VK его уже
+// flag'нул, дальнейшие попытки только жгут session_token'ы и упираются
+// в интерактивный fallback. Считаем именно подряд (ConsecutiveFails),
+// чтобы профиль с богатой историей успехов, который VK внезапно
+// забанил, вылетал быстро, а не ждал пока Failures догонит Successes.
 func (s *ProfileStore) MarkFail(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -210,7 +224,8 @@ func (s *ProfileStore) MarkFail(id string) {
 	}
 	p.LastUsedAt = time.Now()
 	p.Failures++
-	if p.Failures >= s.dropAfterFailures && p.Failures > p.Successes {
+	p.ConsecutiveFails++
+	if p.ConsecutiveFails >= s.dropAfterFailures {
 		s.removeLocked(id)
 	}
 	s.persistLocked()
@@ -249,7 +264,8 @@ func (s *ProfileStore) removeLocked(id string) {
 }
 
 // evictWorstLocked удаляет одну запись чтобы влезть в Capacity.
-// Худший = max Failures, при ties — oldest LastUsedAt.
+// Худший = max ConsecutiveFails, затем max Failures, при ties —
+// oldest LastUsedAt.
 func (s *ProfileStore) evictWorstLocked() {
 	if len(s.profiles) == 0 {
 		return
@@ -257,11 +273,19 @@ func (s *ProfileStore) evictWorstLocked() {
 	worstIdx := 0
 	for i := 1; i < len(s.profiles); i++ {
 		a, b := s.profiles[i], s.profiles[worstIdx]
-		if a.Failures > b.Failures {
-			worstIdx = i
+		if a.ConsecutiveFails != b.ConsecutiveFails {
+			if a.ConsecutiveFails > b.ConsecutiveFails {
+				worstIdx = i
+			}
 			continue
 		}
-		if a.Failures == b.Failures && a.LastUsedAt.Before(b.LastUsedAt) {
+		if a.Failures != b.Failures {
+			if a.Failures > b.Failures {
+				worstIdx = i
+			}
+			continue
+		}
+		if a.LastUsedAt.Before(b.LastUsedAt) {
 			worstIdx = i
 		}
 	}

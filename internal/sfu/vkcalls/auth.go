@@ -9,6 +9,7 @@ package vkcalls
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -267,40 +268,70 @@ func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, pr
 			vkErr.CaptchaSid, vkErr.RedirectURI)
 	}
 
-	ts := captchaTsAsFloat(vkErr.CaptchaTs)
-	attempt := captchaAttemptAsString(vkErr.CaptchaAttempt)
-	if attempt == "" {
-		attempt = "1"
+	challengeFrom := func(ve *vkError) sfu.VKCaptchaChallenge {
+		att := captchaAttemptAsString(ve.CaptchaAttempt)
+		if att == "" {
+			att = "1"
+		}
+		st := extractSessionToken(ve.RedirectURI)
+		if st == "" {
+			st = ve.SessionToken
+		}
+		return sfu.VKCaptchaChallenge{
+			Sid:          ve.CaptchaSid,
+			Ts:           captchaTsAsFloat(ve.CaptchaTs),
+			Attempt:      att,
+			RedirectURI:  ve.RedirectURI,
+			SessionToken: st,
+		}
 	}
 
-	sessionToken := extractSessionToken(vkErr.RedirectURI)
-	if sessionToken == "" {
-		sessionToken = vkErr.SessionToken
+	// refresh re-invokes getAnonymousToken to mint a fresh captcha
+	// challenge. A composite solver (auto-replay → interactive) calls
+	// this before the interactive fallback because the auto attempt
+	// consumes the original session_token (captchaNotRobot.endSession),
+	// and VK then serves a blank page for it.
+	refresh := func(context.Context) (sfu.VKCaptchaChallenge, error) {
+		rbody, rerr := doRequest(nil)
+		if rerr != nil {
+			return sfu.VKCaptchaChallenge{}, rerr
+		}
+		_, rvkErr, rerr := parse(rbody)
+		if rerr != nil {
+			return sfu.VKCaptchaChallenge{}, rerr
+		}
+		if rvkErr == nil || rvkErr.ErrorCode != 14 {
+			return sfu.VKCaptchaChallenge{}, errors.New("refresh: getAnonymousToken returned no captcha challenge")
+		}
+		return challengeFrom(rvkErr), nil
 	}
 
-	lg.Printf("captcha challenge — sid=%s ts=%v attempt=%s", vkErr.CaptchaSid, ts, attempt)
-	sol, err := spec.Solver(ctx, sfu.VKCaptchaChallenge{
-		Sid:          vkErr.CaptchaSid,
-		Ts:           ts,
-		Attempt:      attempt,
-		RedirectURI:  vkErr.RedirectURI,
-		SessionToken: sessionToken,
-	})
+	ch := challengeFrom(vkErr)
+	ch.Refresh = refresh
+
+	lg.Printf("captcha challenge — sid=%s ts=%v attempt=%s", ch.Sid, ch.Ts, ch.Attempt)
+	sol, err := spec.Solver(ctx, ch)
 	if err != nil {
 		return "", fmt.Errorf("captcha solver: %w", err)
 	}
 
-	// Retry with the captured success_token. (sfu.VKCaptchaSolution
-	// only carries SuccessToken — image/audio captcha branches are
-	// not part of the public solver API; if VK rolls those out, we'll
-	// extend the solver type.)
+	// Retry with the captured success_token. If the solver solved a
+	// *refreshed* challenge (different session), replay against that
+	// challenge's sid/ts/attempt — the success_token is bound to it,
+	// not to the original. (image/audio captcha branches are not part
+	// of the public solver API; if VK rolls those out, we'll extend
+	// the solver type.)
+	replaySid, replayTs, replayAttempt := ch.Sid, ch.Ts, ch.Attempt
+	if sol.Sid != "" {
+		replaySid, replayTs, replayAttempt = sol.Sid, sol.Ts, sol.Attempt
+	}
 	retry := url.Values{}
 	retry.Set("captcha_key", "")
-	retry.Set("captcha_sid", vkErr.CaptchaSid)
+	retry.Set("captcha_sid", replaySid)
 	retry.Set("is_sound_captcha", "0")
 	retry.Set("success_token", sol.SuccessToken)
-	retry.Set("captcha_ts", fmt.Sprintf("%v", ts))
-	retry.Set("captcha_attempt", attempt)
+	retry.Set("captcha_ts", fmt.Sprintf("%v", replayTs))
+	retry.Set("captcha_attempt", replayAttempt)
 
 	body, err = doRequest(retry)
 	if err != nil {

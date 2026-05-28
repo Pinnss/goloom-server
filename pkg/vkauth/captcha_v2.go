@@ -158,7 +158,7 @@ func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profi
 	}
 
 	for attempt := 1; attempt <= captchaV2MaxAttempts; attempt++ {
-		token, err := s.solveOnce()
+		token, err := s.solveOnce(attempt)
 		if err == nil {
 			return token, nil
 		}
@@ -201,7 +201,7 @@ type captchaV2Check struct {
 	ShowType     string
 }
 
-func (s *captchaV2Session) solveOnce() (string, error) {
+func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 	html, err := s.fetchCaptchaHTML()
 	if err != nil {
 		return "", fmt.Errorf("fetch captcha html: %w", err)
@@ -232,12 +232,13 @@ func (s *captchaV2Session) solveOnce() (string, error) {
 		return "", fmt.Errorf("settings: %w", err)
 	}
 
-	browserFP, err := captchaV2RandomBrowserFP()
+	freshFP, err := captchaV2RandomBrowserFP()
 	if err != nil {
 		return "", err
 	}
-	if s.saved != nil && strings.TrimSpace(s.saved.BrowserFP) != "" {
-		browserFP = s.saved.BrowserFP
+	browserFP, rotated := pickBrowserFP(s.saved, attempt, freshFP)
+	if rotated {
+		s.logf("browser_fp rotation: fresh random fp (attempt=%d savedConsecFails=%d)", attempt, s.saved.ConsecutiveFails)
 	}
 
 	if m := reCaptchaV2Version.FindStringSubmatch(page.ScriptURL); len(m) > 1 && m[1] != captchaV2ScriptVersion {
@@ -513,6 +514,27 @@ func solveCaptchaPoWV2(ctx context.Context, input string, difficulty int) string
 		}
 	}
 	return ""
+}
+
+// pickBrowserFP выбирает browser_fp для попытки captcha.
+//
+// Сохранённый fp детерминирован для устройства (canvas/webgl-хэш) и
+// одинаков при каждом ручном solve'е. Как только VK его flag'нул,
+// реплей этого fp всегда даёт BOT, а ручная перезахватка тащит тот же
+// fp обратно — auto-replay застревает навсегда. Поэтому сохранённый fp
+// берём только на первой попытке здорового профиля; если профиль уже
+// фейлил (ConsecutiveFails>0) или это retry — отдаём свежий случайный
+// fresh, уходя от помеченного значения. device_json + UA остаются от
+// профиля (их меняет вызывающий, не эта функция).
+//
+// rotated=true когда у профиля был сохранённый fp, но мы его НЕ взяли
+// (для логирования).
+func pickBrowserFP(saved *CapturedProfile, attempt int, fresh string) (fp string, rotated bool) {
+	hasSaved := saved != nil && strings.TrimSpace(saved.BrowserFP) != ""
+	if hasSaved && attempt == 1 && saved.ConsecutiveFails == 0 {
+		return saved.BrowserFP, false
+	}
+	return fresh, hasSaved
 }
 
 func captchaV2RandomBrowserFP() (string, error) {
