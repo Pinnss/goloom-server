@@ -110,17 +110,35 @@ func (t *DataTunnel) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			// A FlagHandshake/FlagHandshakeAck frame after we've started
-			// relaying USED to mean "peer restarted, tear down for fresh
-			// session". But in pool mode the client's merged channel
-			// receives N HELLOs + N HELLO_ACKs from N server pool members
-			// during the handshake, while [session.Handshake] only consumes
-			// 1 of each. The leftovers land here and trigger spurious
-			// teardown loops. 2026-05-27: silently ignore handshake frames
-			// post-handshake; rx-stall watchdog already catches genuinely
-			// dead sessions via a 2-minute no-traffic timeout.
+			// A FlagHandshake/FlagHandshakeAck frame means "a peer is
+			// (re)starting its handshake". Two cases, disambiguated by
+			// whether real WG data has flowed yet (gotFirstRx):
+			//
+			//   1. BEFORE first WG data (gotFirstRx == false): these are
+			//      leftover HELLOs/ACKs from the initial handshake. In pool
+			//      mode the merged channel collects N HELLOs + N ACKs from N
+			//      pool members while [session.Handshake] consumes only one
+			//      of each; the rest land here. Tearing down on them would
+			//      loop forever. → ignore.
+			//
+			//   2. AFTER data has flowed (gotFirstRx == true): the peer
+			//      genuinely reconnected (new Telemost participant, fresh
+			//      app session). The old session is dead. → tear down so the
+			//      supervisor re-runs WaitForPeer + Handshake against the new
+			//      peer. Without this, a reconnecting client hangs in
+			//      handshake because our side stays stuck in the old relay.
+			//
+			// 2026-05-28: restored teardown (gated on gotFirstRx) after the
+			// 2026-05-27 blanket-ignore regressed client reconnection.
 			if f.Flags.Has(tunnel.FlagHandshake) || f.Flags.Has(tunnel.FlagHandshakeAck) {
-				continue
+				if !t.gotFirstRx.Load() {
+					continue
+				}
+				t.mu.Lock()
+				t.rehandshake = true
+				t.mu.Unlock()
+				t.logger.Printf("DT: peer re-handshake after active relay — tearing down for fresh session")
+				return
 			}
 			if !f.Flags.Has(FlagWGData) {
 				continue
