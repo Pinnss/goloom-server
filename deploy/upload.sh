@@ -4,17 +4,16 @@
 # old backups so /opt doesn't fill up.
 #
 # Usage:
-#   ./deploy/upload.sh user@host [--unit goloom-wg-bench] [--dir /opt/goloom-bench] [--keep 2]
+#   ./deploy/upload.sh user@host [--unit goloom-wg-server] [--dir /opt/goloom] [--keep 2]
 #
-# Defaults match the bench server (45.43.89.67) layout. For a fresh
-# server, override --dir to e.g. /opt/goloom and --unit to
-# goloom-wg-server.
+# Defaults target a standard install (--dir /opt/goloom, --unit
+# goloom-wg-server). Override them if you deploy to a different path or
+# run several instances on one host.
 #
-# Why a script: previously each deploy was a 4-step copy/paste over SSH
-# (scp .new, cp -p backup, mv, restart) plus manual `rm` of old
-# .bak.* files when the disk filled up. The bench VPS hit 100% used
-# after 8 backups; now we prune automatically each deploy and keep
-# the last $KEEP for rollback.
+# Why a script: a manual deploy is a 4-step copy/paste over SSH (scp
+# .new, cp -p backup, mv, restart) plus manual `rm` of old .bak.* files
+# when /opt fills up. This automates the atomic swap and prunes old
+# backups, keeping the last $KEEP for rollback.
 
 set -euo pipefail
 
@@ -26,8 +25,8 @@ fi
 REMOTE="$1"
 shift
 
-UNIT="goloom-wg-bench"
-DIR="/opt/goloom-bench"
+UNIT="goloom-wg-server"
+DIR="/opt/goloom"
 KEEP=2
 BINARY_LOCAL="goloom-wg-server-linux"
 BINARY_REMOTE="goloom-wg-server"

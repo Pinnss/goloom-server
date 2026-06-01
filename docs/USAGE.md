@@ -17,6 +17,8 @@ Each tunnelled client gets its own **inbound** — a unique WireGuard interface,
      - `admin-webview` (default) — the admin panel proxies VK's captcha to your browser. Works on headless VPS.
      - `auto` — server pops the captcha into a system browser. Requires a desktop session on the VPS.
      - `none` — fail-fast on captcha challenges.
+   - **VK TURN SRTP** (recommended) — paste a VK call link, then set **Listen address (UDP)** (e.g. `0.0.0.0:56001`, open in the firewall). The server relays WireGuard through VK's TURN servers as fake WebRTC media — no server-side captcha, ~30–40 Mbps. The client link is the **`vkturnproxy://`** link / QR on the inbound card, not a `goloom://` string. See [VK TURN SRTP](#vk-turn-srtp) below.
+   - **VK TURN (legacy DTLS)** — deprecated; VK throttles it to ~7–9 KB/s. Use SRTP instead.
 4. Click **Создать**. The panel returns a `goloom://...` string and a QR code.
 5. Pass the QR / string to the client (mobile or desktop).
 
@@ -30,6 +32,20 @@ When a VK inbound first runs, VK demands a captcha solve. With `admin-webview`:
 4. The inbound transitions to `waiting_for_client`.
 
 VK's `success_token` is single-use (~60 s lifetime), so each VK reconnect on the server side asks again. For long-running inbounds the panel handles this automatically — you'll only see the badge when human intervention is needed.
+
+## VK TURN SRTP
+
+The **VK TURN SRTP** transport relays WireGuard through VK's *own* TURN servers, disguised as a video call's media (RTP/SRTP). The key point: you never run a TURN server. VK's TURN is the relay; the Goloom server is just the "other peer" the client tells VK to forward to. Because VK's TURN can't be blocked without breaking VK calls country-wide, the traffic passes DPI — and SRTP framing dodges VK's media-shape policy, giving ~30–40 Mbps (vs ~7–9 KB/s on the legacy DTLS path).
+
+**Provision (operator):**
+
+1. **+ Создать inbound** → **Transport** = `VK TURN SRTP`.
+2. **VK Call link** — `https://vk.com/call/join/<id>`. Only the client uses it (to request TURN credentials); the server never joins the call.
+3. **Listen address (UDP)** — public UDP port the relay binds, e.g. `0.0.0.0:56001`. Unique per inbound, open in the firewall.
+4. Leave auto-provision WG on → **Создать**.
+5. On the inbound card, click **📋 vkturnproxy://** to copy the client link, or show its QR.
+
+**Connect (client):** the `vkturnproxy://` link is consumed directly by the Goloom Android app (it routes the profile to the SRTP-relay path: VK auth → TURN allocations → DTLS-SRTP handshake) and by anton48/Moroka8 clients build125+. Import the link or scan the QR and connect — no `goloom://` connstr is involved for this transport.
 
 ## WB Stream auth
 

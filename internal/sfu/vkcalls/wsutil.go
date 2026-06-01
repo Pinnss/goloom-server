@@ -1,7 +1,7 @@
 // WS utility helpers shared between the signaling code in peer.go
 // and any future protocol-debug tooling. The big WSDump function
 // (frame-level dumper used during reverse-engineering) lives in the
-// goloom-poc PoC, not here — production has no need to dump every
+// reverse-engineering tooling, not here — production has no need to dump every
 // frame to stdout.
 
 package vkcalls

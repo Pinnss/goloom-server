@@ -21,6 +21,10 @@ This repository contains:
 | **Yandex Telemost** | Stable | VP8 video frames carry WireGuard. |
 | **Wildberries Stream** (LiveKit) | Stable | DataChannel-native; needs operator-captured cookies (see [USAGE.md](docs/USAGE.md#wb-stream-auth)). |
 | **VK Calls** | Stable | VP8 video over anonymous-peer join; client solves captcha once via WebView and replays the session profile thereafter. |
+| **VK TURN SRTP** | Stable — **recommended** | Wraps WireGuard as WebRTC media (RTP/SRTP) and relays it through VK's *own* TURN servers. The Goloom server is just the call's "other peer" — it never runs a TURN server itself. Bypasses VK's media-shape policy: ~30–40 Mbps vs ~2 Mbps on the legacy path. |
+| **VK TURN (legacy DTLS)** | Deprecated | DTLS + WireGuard over VK TURN. VK shape-throttles this to ~7–9 KB/s since 2026-05; kept only for older clients. |
+
+> The first three transports join a conference as a hidden participant. The two **VK TURN** transports instead relay WireGuard through VK's own TURN infrastructure — you do **not** run your own TURN server; VK's is the relay, and that is exactly what makes the traffic hard to block. See [USAGE.md → VK TURN SRTP](docs/USAGE.md#vk-turn-srtp).
 
 ## Quick start
 

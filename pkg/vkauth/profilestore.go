@@ -52,7 +52,7 @@ type CapturedProfile struct {
 
 // ProfileStore — пул CapturedProfile с persistence.
 //
-// Параметры пула (из решения по открытым вопросам в poc/docs/vk-calls-redesign.md):
+// Параметры пула:
 //   - Capacity: cap пула (10–20). При переполнении вытесняется худший
 //     профиль (max Failures, затем oldest LastUsedAt).
 //   - Cooldown: минимальное время между двумя реюзами одного профиля.

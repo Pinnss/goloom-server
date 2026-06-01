@@ -8,7 +8,7 @@
 
 - VPS с публичным IPv4 (1 vCPU / 1 GB RAM хватит)
 - Root SSH-доступ
-- Открытые порты: TCP 9443 (admin-панель), UDP 51820+ (по одному на inbound)
+- Открытые порты: TCP 9443 (admin-панель), UDP 51820+ (по одному на WireGuard-интерфейс). Для **VK TURN SRTP** inbound'а нужен ещё один публичный UDP-порт под relay-листенер (например, 56001) — открой его в фаерволе провайдера.
 - Для VK Звонков inbound: либо desktop-сессия на VPS, либо режим капчи `admin-webview` (без GUI; см. [USAGE.ru.md](USAGE.ru.md))
 
 ## 1. Скачать бинарь сервера
@@ -113,6 +113,16 @@ ADMIN bootstrap credentials → username=admin  password=abc123def456...
 Сохрани. Панель отдаст `goloom://...` connection string + QR. Передай это клиенту.
 
 Для WB Stream inbound'ов нужно один раз вытащить cookies из браузера — см. [USAGE.ru.md → WB Stream auth](USAGE.ru.md#wb-stream-auth).
+
+### VK TURN SRTP inbound (рекомендуется)
+
+Транспорт **VK TURN SRTP** — самый быстрый и трудноблокируемый путь: WireGuard ретранслируется через собственные TURN-серверы VK под видом WebRTC-медиа. Свой TURN-сервер поднимать **не нужно** — ретранслятором выступает VK, а Goloom-сервер это всего лишь «второй участник» звонка.
+
+1. **+ Создать inbound** → **Transport** = `VK TURN SRTP`.
+2. **VK Call link** — ссылка вида `https://vk.com/call/join/<id>`. По ней клиент получает TURN-креды от VK; сам сервер в звонок не заходит.
+3. **Listen address (UDP)** — публичный UDP-порт, который слушает relay этого inbound'а, например `0.0.0.0:56001`. Уникален на каждый inbound и **открыт в фаерволе провайдера**.
+4. Оставь **авто-провижн WG** включённым. Сохрани.
+5. На карточке inbound'а жми **📋 vkturnproxy://** (или сканируй QR), получи ссылку для клиента и передай её — приложение Goloom для Android или клиент anton48/Moroka8 (build125+). Капчу на сервере для этого транспорта решать не нужно.
 
 ## 6. Обновление
 

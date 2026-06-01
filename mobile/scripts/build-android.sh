@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Сборка Android .aar из goloom-poc/mobile через gomobile.
+# Сборка Android .aar из mobile/ этого репозитория через gomobile.
 #
 # Перед запуском:
 #   export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/26.1.10909125
@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-# Пройти к корню goloom-poc независимо от того, откуда запустили скрипт.
+# Пройти к корню репозитория независимо от того, откуда запустили скрипт.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 

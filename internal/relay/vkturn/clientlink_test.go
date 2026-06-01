@@ -17,7 +17,7 @@ func validParams() LinkParams {
 		PresharedKey:     "5TzS4OQPulRyEZKB5QNacJ+/eGrkmIsY5B4pPg+RPTg=",
 		TunnelAddress:    "10.66.66.3/24",
 		VKLink:           "https://vk.com/call/join/AmMgBmKMd6Wei0nBvp0uQC7IGgltlMzwNvmOKKb9hGU",
-		PeerAddress:      "193.233.252.80:56000",
+		PeerAddress:      "203.0.113.10:56000",
 		UseWrap:          false,
 	}
 }

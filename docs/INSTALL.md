@@ -8,7 +8,7 @@ End-to-end setup of `goloom-wg-server` on a fresh Debian/Ubuntu VPS.
 
 - A VPS with a public IPv4 (1 vCPU / 1 GB RAM is enough)
 - Root SSH access
-- Open ports: TCP 9443 (admin panel), UDP 51820+ (one per inbound)
+- Open ports: TCP 9443 (admin panel), UDP 51820+ (one per WireGuard interface). A **VK TURN SRTP** inbound also needs one public UDP port for its relay listener (e.g. 56001) — open it in your provider's firewall.
 - For VK Calls inbounds: a desktop session OR the `admin-webview` captcha mode (no GUI needed; see [USAGE.md](USAGE.md))
 
 ## 1. Download the server binary
@@ -113,6 +113,16 @@ In the dashboard click **+ Создать inbound**:
 Save. The panel returns a `goloom://...` connection string + QR code. Hand it to your client.
 
 For WB Stream inbounds you also need to capture browser cookies once — see [USAGE.md → WB Stream auth](USAGE.md#wb-stream-auth).
+
+### VK TURN SRTP inbound (recommended)
+
+The **VK TURN SRTP** transport is the fastest and hardest-to-block path: WireGuard is relayed through VK's own TURN servers, disguised as WebRTC media. You do **not** run a TURN server — VK's is the relay, and the Goloom server is merely the call's "other peer".
+
+1. **+ Создать inbound** → **Transport** = `VK TURN SRTP`.
+2. **VK Call link** — a `https://vk.com/call/join/<id>` link. The client uses it to obtain TURN credentials from VK; the server itself never joins the call.
+3. **Listen address (UDP)** — the public UDP port this inbound's relay binds, e.g. `0.0.0.0:56001`. Must be unique per inbound and **open in your provider's firewall**.
+4. Leave **auto-provision WG** enabled. Save.
+5. On the inbound card click **📋 vkturnproxy://** (or scan the QR) to get the client link, then hand it to the client — the Goloom Android app or an anton48/Moroka8 client (build125+). This transport needs no captcha solving on the server.
 
 ## 6. Updating
 
