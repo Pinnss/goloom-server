@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -348,6 +349,15 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 	}
 	lg.Printf("STAGE5 ✓ PUB answer applied (sdp=%d) — full SDP follows:\n----- BEGIN PUB ANSWER SDP -----\n%s----- END PUB ANSWER SDP -----",
 		len(pubAns.SDP), pubAns.SDP)
+	// Capability summary (2026-06-25 diagnostic): gates whether the CC lever
+	// (transport-cc echo) and the NACK/RTX lever (rtx negotiated) are even
+	// viable on this SFU — see throughput memo. Grep-friendly one-liner.
+	lg.Printf("STAGE5 SFU answer caps: transport-cc=%v rtx=%v flexfec=%v nack=%v remb=%v",
+		strings.Contains(pubAns.SDP, "transport-cc"),
+		strings.Contains(pubAns.SDP, "rtx/"),
+		strings.Contains(pubAns.SDP, "flexfec"),
+		strings.Contains(pubAns.SDP, "nack"),
+		strings.Contains(pubAns.SDP, "goog-remb"))
 
 	subOff, err := waitOrTimeout(ctx, s.subOfferCh, 15*time.Second, "subscriberSdpOffer")
 	if err != nil {
@@ -943,6 +953,12 @@ func (s *Session) WaitForPeer(ctx context.Context, timeout time.Duration) (strin
 		case <-cctx.Done():
 			return "", fmt.Errorf("timeout waiting for peer to join")
 		case <-tk.C:
+			// Bail out immediately if the underlying WS died (clean close or
+			// the liveness watchdog) so a caller waiting "forever" for a peer
+			// still reconnects promptly instead of polling a dead session.
+			if s.Client.IsClosed() {
+				return "", fmt.Errorf("session closed while waiting for peer")
+			}
 			s.mu.Lock()
 			for id := range s.knownPeers {
 				if id != s.Conn.PeerID {

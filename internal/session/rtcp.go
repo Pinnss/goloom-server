@@ -96,6 +96,16 @@ func logRTCPPackets(lg *log.Logger, label string, pkts []rtcp.Packet) {
 				lg.Printf("%s RR ssrc=%d lost_total=%d frac_lost=%d jitter=%d",
 					label, rep.SSRC, rep.TotalLost, rep.FractionLost, rep.Jitter)
 			}
+		case *rtcp.TransportLayerCC:
+			// TWCC feedback from the SFU — the missing closed-loop signal a
+			// congestion controller would consume. delivered = packets with a
+			// recv-delta; lost ≈ status_count − delivered. Diagnostic only
+			// (2026-06-25): confirms the SFU echoes transport-cc and quantifies
+			// real loss before any rate-control work (see throughput memo).
+			delivered := len(p.RecvDeltas)
+			lost := int(p.PacketStatusCount) - delivered
+			lg.Printf("%s TWCC base_seq=%d status_count=%d delivered=%d lost=%d fb_pkt=%d",
+				label, p.BaseSequenceNumber, p.PacketStatusCount, delivered, lost, p.FbPktCount)
 		case *rtcp.SourceDescription:
 			// noisy and uninteresting; ignore
 		default:

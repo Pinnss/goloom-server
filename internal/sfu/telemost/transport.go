@@ -31,6 +31,15 @@ import (
 // us use the std-lib name as a method dependency directly.)
 var urlParse = url.Parse
 
+// idleWaitForPeer is effectively "wait forever" for a peer to join. The real
+// exit during idle is the session dying (Client.IsClosed, driven by the ping
+// liveness watchdog), not this timer. We do NOT tear down and re-join the room
+// on a short timer: each re-join churns the Telemost room and, over thousands
+// of idle cycles, degrades the SFU until it stops forwarding our video to a
+// new subscriber (the client then hangs in handshake). The year-long value is
+// only a last-resort backstop against an unforeseen stuck state.
+const idleWaitForPeer = 365 * 24 * time.Hour
+
 // Compile-time interface assertion — fails the build if Session no
 // longer implements ICEHostsProvider.
 var _ sfu.ICEHostsProvider = (*Session)(nil)
@@ -107,7 +116,7 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	// Wait for the remote peer to appear and complete the in-band
 	// HELLO/HELLO_ACK exchange. Failures here propagate to the caller
 	// before any goroutine ownership is transferred.
-	if _, err := sess.WaitForPeer(ctx, 5*time.Minute); err != nil {
+	if _, err := sess.WaitForPeer(ctx, idleWaitForPeer); err != nil {
 		return nil, fmt.Errorf("telemost: wait for peer: %w", err)
 	}
 
@@ -116,6 +125,7 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	cameraSender.VP8Prefix = mediastubs.VP9BlackKeyframe
 	cameraSender.InterframePrefix = mediastubs.VP9InterframeHeader
 	cameraSender.SideFlag = sendSideFlag
+	cameraSender.Logger = lg // backpressure-drop diagnostics (2026-06-25)
 	cameraSender.Start()
 
 	peerID, err := session.Handshake(ctx, lg, sess, cameraSender, merged, 1)

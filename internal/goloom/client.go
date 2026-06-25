@@ -48,6 +48,7 @@ type Client struct {
 	closed      bool
 	handler     IncomingHandler
 	pendingAcks map[string]time.Time // uid -> sent_at, drained on incoming ack
+	lastRecv    time.Time            // last successful WS read; liveness heartbeat
 
 	pingTicker      *time.Ticker
 	telemetryTicker *time.Ticker
@@ -66,6 +67,15 @@ func NewClient(ws *websocket.Conn, lg *log.Logger) *Client {
 		ackTimeout:  9 * time.Second,
 	}
 }
+
+// pingDeadAfter is how long an idle session may go without ANY inbound WS
+// message before the liveness watchdog declares it dead and forces a
+// reconnect. A healthy session receives a ping-ack every few seconds, so this
+// is ~6 missed pings — long enough to tolerate jitter, short enough that a
+// dead idle inbound recovers before a user notices. This is what lets the
+// server WaitForPeer wait indefinitely (no fixed reconnect timer) without
+// churning the Telemost room.
+const pingDeadAfter = 30 * time.Second
 
 // OnIncoming registers a single dispatcher. The handler is invoked
 // synchronously from the read loop, so it must not block on Send (use the
@@ -96,6 +106,7 @@ func (c *Client) ConfigurePeriodicTasks(ctx context.Context, ping PingPongConfig
 	c.pingTicker = time.NewTicker(time.Duration(pingMs) * time.Millisecond)
 	c.telemetryTicker = time.NewTicker(time.Duration(telemMs) * time.Millisecond)
 	c.tickersDone = make(chan struct{})
+	c.noteRecv() // seed the liveness heartbeat so the watchdog has a baseline
 	go c.periodicLoop(ctx)
 }
 
@@ -115,6 +126,17 @@ func (c *Client) periodicLoop(ctx context.Context) {
 		case <-c.tickersDone:
 			return
 		case <-c.pingTicker.C:
+			// Liveness watchdog: a healthy session receives a ping-ack every
+			// few seconds. If nothing has arrived for pingDeadAfter the WS is
+			// dead (often a silently-dropped TCP conn with no close frame) —
+			// force-close so the supervisor reconnects instead of idling on a
+			// corpse. Without this, waiting indefinitely for a peer would risk
+			// hanging forever on a half-dead session.
+			if since := c.sinceLastRecv(); since > pingDeadAfter {
+				c.log.Printf("session dead: no WS message for %s (> %s) — closing for reconnect", since.Truncate(time.Second), pingDeadAfter)
+				_ = c.Close()
+				return
+			}
 			if err := c.Send(Envelope{Ping: &Ping{}}); err != nil {
 				c.log.Printf("ping send err: %v", err)
 				return
@@ -205,6 +227,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			c.markClosed()
 			return
 		}
+		c.noteRecv()
 		c.dispatch(data)
 	}
 }
@@ -256,6 +279,30 @@ func (c *Client) markClosed() {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
+}
+
+// IsClosed reports whether the WS has been closed — cleanly via Close() or
+// after a read error / liveness-watchdog teardown. WaitForPeer polls this so
+// it can wait indefinitely for a peer yet bail out promptly when the session
+// dies, instead of relying on a fixed reconnect timer (which churns the room).
+func (c *Client) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// noteRecv records that a WS message just arrived (liveness heartbeat).
+func (c *Client) noteRecv() {
+	c.mu.Lock()
+	c.lastRecv = time.Now()
+	c.mu.Unlock()
+}
+
+// sinceLastRecv returns how long since the last WS message arrived.
+func (c *Client) sinceLastRecv() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Since(c.lastRecv)
 }
 
 // Close shuts down the WS conn. Safe to call multiple times.

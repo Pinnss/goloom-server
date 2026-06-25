@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"log"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -124,6 +125,12 @@ type Sender struct {
 	TxSamples atomic.Uint64
 	TxBytes   atomic.Uint64
 	TxBatches atomic.Uint64
+	TxDrops   atomic.Uint64 // batches dropped on full queue (backpressure) — diagnostic
+
+	// Logger, when non-nil, receives throttled backpressure-drop diagnostics.
+	// Optional / nil-safe. Set by the server telemost path (2026-06-25) to
+	// tell local queue-overflow stalls apart from network loss.
+	Logger *log.Logger
 }
 
 const (
@@ -321,8 +328,16 @@ func (s *Sender) shipLocked(out []byte) {
 	case s.queue <- out:
 		s.TxBatches.Add(1)
 	default:
-		// Drop on backpressure — the receive side will detect via gaps
-		// in msgIDs (KCP retransmits). Better than blocking the caller.
+		// Queue full — drop this batch rather than block the caller. WG runs
+		// end-to-end above this tunnel and handles its own reliability, so a
+		// dropped batch surfaces as a WG-layer retransmit, not corruption.
+		// (The old comment claimed KCP retransmits — that stack is dead code.)
+		// Counted + throttled-logged so a 0-Mbps stall caused by LOCAL queue
+		// overflow is distinguishable from network loss.
+		d := s.TxDrops.Add(1)
+		if s.Logger != nil && (d == 1 || d%256 == 0) {
+			s.Logger.Printf("tunnel-sender: backpressure drop #%d (queue %d/%d full)", d, len(s.queue), cap(s.queue))
+		}
 	}
 }
 

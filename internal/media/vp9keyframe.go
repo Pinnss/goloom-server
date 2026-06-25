@@ -22,6 +22,11 @@ package media
 //
 // 2026-05-27 — added when migrating the goloom tunnel from VP8 to VP9.
 // Replaces [VP8BlackKeyframe] for transports where VP9 is negotiated.
+// NOTE: resolution is kept 16x16 on purpose — declaring a larger size
+// (e.g. 1280x720) in the VP9 SS descriptor while the frame is only ~9 bytes
+// is inconsistent and Telemost's SFU drops such "720p in 9 bytes" keyframes,
+// which breaks pairing. Raising the declared resolution requires also padding
+// keyframes to a plausible size (see throughput-masking work).
 var VP9BlackKeyframe = []byte{
 	0x82,             // 10 00 0 0 1 0 = frame_marker=2, profile=0, show_exist=0, key, show=1, error_resilient=0
 	0x49, 0x83, 0x42, // VP9 sync_code (mandatory)
