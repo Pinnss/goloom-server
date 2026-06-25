@@ -35,10 +35,17 @@ const (
 	// gets rate-limited.
 	vkClientID     = "6287487"
 	vkClientSecret = "QbYic1K3lEV5kTGiqlq2"
-	// vkAPIVersion соответствует тому что шлёт vk.com web SDK
-	// на момент vk-turn-proxy PR #162. Реальные браузеры посылают
-	// именно эту версию — отклонение на minor — bot-сигнал.
-	vkAPIVersion = "5.275"
+	// vkAPIVersion соответствует тому что шлёт vk.com web SDK.
+	// Реальные браузеры посылают именно эту версию — отклонение на
+	// minor — bot-сигнал.
+	//
+	// Поднято 5.275 → 5.282 (2026-06-24), вслед за anton48
+	// vk-turn-proxy-ios build162 / samosvalishe (const APIVersion =
+	// "5.282"). После VK Smart-Captcha-v2 токен, выписанный
+	// getAnonymousToken на старой версии, отклонялся на
+	// vchat.joinConversationByLink с error.webrtc.auth.anonym_token.not_found
+	// — версия должна совпадать на всех calls.* вызовах.
+	vkAPIVersion = "5.282"
 
 	okApplicationKey = "CGMMEJLGDIHBABABA"
 )
@@ -325,13 +332,21 @@ func vkGetAnonymousToken(ctx context.Context, c *http.Client, lg *log.Logger, pr
 	if sol.Sid != "" {
 		replaySid, replayTs, replayAttempt = sol.Sid, sol.Ts, sol.Attempt
 	}
+	// VK Smart-Captcha-v2 (2026-06-24) перестал класть captcha_sid в
+	// error_code 14 — теперь прилетают только redirect_uri + session_token.
+	// Когда sid пуст, в retry шлём ТОЛЬКО success_token: пустые
+	// captcha_sid/captcha_key/ts/attempt в теле сбивают VK с толку и
+	// запрос реджектится (см. anton48 vk-turn-proxy-ios build162
+	// buildCaptchaRetry). Со старым форматом (sid не пуст) — полный набор.
 	retry := url.Values{}
-	retry.Set("captcha_key", "")
-	retry.Set("captcha_sid", replaySid)
-	retry.Set("is_sound_captcha", "0")
 	retry.Set("success_token", sol.SuccessToken)
-	retry.Set("captcha_ts", fmt.Sprintf("%v", replayTs))
-	retry.Set("captcha_attempt", replayAttempt)
+	if replaySid != "" {
+		retry.Set("captcha_key", "")
+		retry.Set("captcha_sid", replaySid)
+		retry.Set("is_sound_captcha", "0")
+		retry.Set("captcha_ts", fmt.Sprintf("%v", replayTs))
+		retry.Set("captcha_attempt", replayAttempt)
+	}
 
 	body, err = doRequest(retry)
 	if err != nil {
