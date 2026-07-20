@@ -646,6 +646,16 @@ func rewriteCaptchaHTML(html string, mnt *proxyMount, urlBase string) string {
         if (isOurHost(s)) {
             try {
                 var u = new URL(s, window.location.href);
+                // selfBase is an absolute origin in AutoProxy mode, but a MOUNT
+                // PATH ("/captcha-proxy/<id>") in admin mode. There, prefixing
+                // unconditionally is not idempotent: each pass prepends the mount
+                // again, and since the MutationObserver below watches src/href,
+                // every write re-triggers a rewrite — an unbounded microtask loop
+                // that hangs the tab. Leave URLs that already carry the mount.
+                if (selfBase.charAt(0) === '/' &&
+                    (u.pathname === selfBase || u.pathname.indexOf(selfBase + '/') === 0)) {
+                    return s;
+                }
                 return selfBase + u.pathname + u.search + u.hash;
             } catch (e) { return s; }
         }
@@ -659,7 +669,14 @@ func rewriteCaptchaHTML(html string, mnt *proxyMount, urlBase string) string {
         var v = el.getAttribute(a);
         if (!v) return;
         var r = rewriteUrl(v);
-        if (r !== v) el.setAttribute(a, r);
+        if (r === v) return;
+        // Пишем только идемпотентные результаты. MutationObserver ниже слушает
+        // src/href, поэтому каждая запись возвращается сюда же: если rewriteUrl
+        // не сходится к неподвижной точке, получаем бесконечный цикл в
+        // микрозадачах и повешенную вкладку. Пусть лучше URL останется
+        // неперезаписанным, чем браузер встанет.
+        if (rewriteUrl(r) !== r) return;
+        el.setAttribute(a, r);
     }
     function rewriteDoc(root) {
         if (!root || !root.querySelectorAll) return;

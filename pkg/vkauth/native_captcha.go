@@ -84,8 +84,14 @@ func (s *NativeCaptchaSolver) Solve(ctx context.Context, ch sfu.VKCaptchaChallen
 	s.ch = tokens
 	s.mu.Unlock()
 	defer func() {
+		// Compare-and-clear: если эта попытка отвалилась по таймауту, а вызывающий
+		// уже начал следующую, s.ch принадлежит ЕЙ — затирать его нельзя, иначе
+		// новый Solve навсегда останется без канала и прождёт впустую до своего
+		// таймаута.
 		s.mu.Lock()
-		s.ch = nil
+		if s.ch == tokens {
+			s.ch = nil
+		}
 		s.mu.Unlock()
 	}()
 
