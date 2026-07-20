@@ -5,10 +5,13 @@
 /goloom-wg-server-linux
 /goloom-wg-server-linux-amd64
 /goloom-wg-server-linux-arm64
-/goloom-wg-client
-/goloom-wg-client.exe
-/goloom-wg-gui.exe
-/goloom-wg-gui-windows-amd64.zip
+# Глобы, а не точные имена: сборки носят version/platform-вставки
+# (goloom-wg-gui-v1.1.3-windows-amd64.zip, goloom-wg-client-test.exe), и
+# точные шаблоны их не ловили — ~100 МБ внутренних бинарников висели
+# неотслеживаемыми и уехали бы при первом `git add -A`.
+/goloom-wg-client*
+/goloom-wg-gui*
+/goloom-telemost-bench*
 
 # Local benchmarking / profiling scratchpad — VPS-side scripts and
 # captured traces that aren't part of the shipped product.
