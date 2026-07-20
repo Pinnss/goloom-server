@@ -154,11 +154,68 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 		c.emitPhase("captcha", "open captcha in WebView")
 		launcher.Open(url)
 	}
-	base := vkauth.AutoProxyCaptchaSolverWithOpener(2*time.Minute, c.logger, store, opener)
+
+	// VK'шный URL уходит в WebView КАК ЕСТЬ, без localhost-прокси: иначе
+	// ломается CORS для adFp (privacy-cs.mail.ru) и подменяется JA3, и VK
+	// отдаёт status=BOT даже на настоящий тап. Подробности — в
+	// [vkauth.NativeCaptchaSolver]. Токен присылает native через
+	// [Client.SubmitVKCaptchaToken].
+	native := vkauth.NewNativeCaptchaSolver(2*time.Minute, c.logger, opener)
+	c.mu.Lock()
+	c.captchaNative = native
+	c.captchaStore = store
+	c.mu.Unlock()
+
+	base := sfu.VKCaptchaSolver(native.Solve)
 	if store != nil {
 		return vkauth.WithReplaySolver(store, base, c.logger)
 	}
 	return base
+}
+
+// SubmitVKCaptchaToken принимает success_token, который native-сторона
+// выцепила из ответа captchaNotRobot.check в WebView. Вызывается из Kotlin
+// через JS-мост; безопасен если никто не ждёт токен.
+func (c *Client) SubmitVKCaptchaToken(token string) {
+	c.mu.Lock()
+	native := c.captchaNative
+	c.mu.Unlock()
+	if native == nil {
+		c.logger.Printf("vkcalls/captcha-native: token submitted before solver was built — ignored")
+		return
+	}
+	native.Submit(token)
+}
+
+// SubmitVKCaptchaProfile складывает в пул отпечаток, снятый native-стороной со
+// страницы captcha. Вызывается из Kotlin через JS-мост.
+//
+// Раньше это делал loggingTransport внутри локального прокси, но прокси убран
+// (он же и ломал captcha), а VK к тому же раскладывает отпечаток по двум
+// запросам: device в componentDone, browser_fp в check. Native-хук копит обе
+// половины и присылает их сюда одним вызовом — [vkauth.ProfileStore.Capture]
+// молча отбрасывает профиль с любым пустым полем.
+//
+// Смысл пула: следующий коннект проходит captcha автоматически, без UI.
+func (c *Client) SubmitVKCaptchaProfile(deviceJSON, browserFP, userAgent string) {
+	c.mu.Lock()
+	store := c.captchaStore
+	c.mu.Unlock()
+	if store == nil {
+		return
+	}
+	if deviceJSON == "" || browserFP == "" || userAgent == "" {
+		c.logger.Printf("vkcalls/captcha-native: incomplete profile (device=%dB browser_fp=%dB ua=%dB) — not pooled",
+			len(deviceJSON), len(browserFP), len(userAgent))
+		return
+	}
+	store.Capture(vkauth.CapturedProfile{
+		UserAgent:  userAgent,
+		DeviceJSON: deviceJSON,
+		BrowserFP:  browserFP,
+	})
+	c.logger.Printf("vkcalls/captcha-native: fingerprint pooled (device=%dB browser_fp=%dB); pool=%d",
+		len(deviceJSON), len(browserFP), len(store.Snapshot()))
 }
 
 // strconv used elsewhere in mobile; keep import alias consumer.

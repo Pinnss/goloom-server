@@ -147,14 +147,18 @@ func SolveCaptchaV2(ctx context.Context, challenge sfu.VKCaptchaChallenge, profi
 		}
 	}
 
+	domain, origin := captchaV2DomainOrigin(challenge.RedirectURI)
+
 	s := &captchaV2Session{
-		ctx:            ctx,
-		client:         client,
-		profile:        effectiveProfile,
-		saved:          saved,
-		lg:             lg,
-		sessionToken:   challenge.SessionToken,
-		redirectURI:    challenge.RedirectURI,
+		ctx:          ctx,
+		client:       client,
+		profile:      effectiveProfile,
+		saved:        saved,
+		lg:           lg,
+		sessionToken: challenge.SessionToken,
+		redirectURI:  challenge.RedirectURI,
+		domain:       domain,
+		origin:       origin,
 	}
 
 	for attempt := 1; attempt <= captchaV2MaxAttempts; attempt++ {
@@ -186,6 +190,34 @@ type captchaV2Session struct {
 	lg           *log.Logger
 	sessionToken string
 	redirectURI  string
+	// domain — значение параметра `domain` из VK'шного redirect_uri
+	// (id.vk.ru/not_robot_captcha?domain=vk.com&session_token=…), а не
+	// константа: VK мигрирует vk.com -> vk.ru, и хардкод ломается на
+	// каждом переключении. Прибить сюда vk.ru тоже нельзя — на 2026-07-20
+	// VK всё ещё отдаёт domain=vk.com.
+	domain string
+	// origin — origin самой captcha-страницы, тоже выведенный из
+	// redirect_uri. Раньше был прибит к https://id.vk.com, из-за чего мы
+	// стучались на api.vk.ru, представляясь vk.com.
+	origin string
+}
+
+// captchaV2DomainOrigin вытаскивает (domain, origin) из VK'шного redirect_uri.
+// На нераспарсиваемом URL откатывается на текущие значения VK, чтобы солвер не
+// падал целиком из-за косметики.
+func captchaV2DomainOrigin(redirectURI string) (string, string) {
+	domain, origin := "vk.com", "https://id.vk.ru"
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return domain, origin
+	}
+	if d := u.Query().Get("domain"); d != "" {
+		domain = d
+	}
+	if u.Scheme != "" && u.Host != "" {
+		origin = u.Scheme + "://" + u.Host
+	}
+	return domain, origin
 }
 
 type captchaV2Page struct {
@@ -193,6 +225,12 @@ type captchaV2Page struct {
 	PowDifficulty int
 	ScriptURL     string
 	ShowType      string
+	// Settings — сырой `data` из window.init, обёрнутый как {"response": data}.
+	// Slider-настройки живут ИМЕННО здесь: ответ captchaNotRobot.settings их не
+	// содержит, и без них getContent отвечает ERROR (замерено на живом VK
+	// 2026-07-20). Формат совпадает с ответом API, чтобы отдавать в
+	// [extractSliderSettings] как есть.
+	Settings map[string]any
 }
 
 type captchaV2Check struct {
@@ -227,7 +265,7 @@ func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 	}
 	s.logf("PoW solved")
 
-	base := captchaV2BaseValues(s.sessionToken)
+	base := captchaV2BaseValues(s.sessionToken, s.domain)
 	if _, err := s.captchaRequest("captchaNotRobot.settings", base); err != nil {
 		return "", fmt.Errorf("settings: %w", err)
 	}
@@ -245,15 +283,24 @@ func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 		s.logf("script version drift: known=%s seen=%s (captcha_v2 may need update)", captchaV2ScriptVersion, m[1])
 	}
 
-	switch page.ShowType {
-	case "slider":
-		return "", ErrSliderUnsupported
-	case "checkbox", "":
-		token, err := s.solveCheckboxCaptcha(browserFP, hash, debugInfo)
-		// endSession — best-effort cleanup.
+	endSession := func() {
+		// best-effort cleanup.
 		if _, e := s.captchaRequest("captchaNotRobot.endSession", base); e != nil {
 			s.logf("endSession failed (non-fatal): %v", e)
 		}
+	}
+
+	switch page.ShowType {
+	case "slider":
+		// Slider пока решает только пользователь: авто-солвер для него не
+		// реализован, caller фоллбэкнется на интерактивный WebView.
+		// page.Settings уже несёт slider-настройки из window.init — они
+		// понадобятся, когда авто-solver появится (в ответе
+		// captchaNotRobot.settings их НЕТ, и getContent без них отдаёт ERROR).
+		return "", ErrSliderUnsupported
+	case "checkbox", "":
+		token, err := s.solveCheckboxCaptcha(browserFP, hash, debugInfo)
+		endSession()
 		return token, err
 	default:
 		return "", fmt.Errorf("unsupported show_type: %s", page.ShowType)
@@ -267,7 +314,7 @@ func (s *captchaV2Session) solveCheckboxCaptcha(browserFP, hash, debugInfo strin
 	}
 	if _, err := s.captchaRequest("captchaNotRobot.componentDone", [][2]string{
 		{"session_token", s.sessionToken},
-		{"domain", "vk.com"},
+		{"domain", s.domain},
 		{"adFp", ""},
 		{"browser_fp", browserFP},
 		{"device", deviceJSON},
@@ -309,7 +356,7 @@ func (s *captchaV2Session) solveCheckboxCaptcha(browserFP, hash, debugInfo strin
 func (s *captchaV2Session) performCaptchaCheck(browserFP, hash, answerJSON, cursor, debugInfo string) (*captchaV2Check, error) {
 	resp, err := s.captchaRequest("captchaNotRobot.check", [][2]string{
 		{"session_token", s.sessionToken},
-		{"domain", "vk.com"},
+		{"domain", s.domain},
 		{"adFp", ""},
 		{"accelerometer", "[]"},
 		{"gyroscope", "[]"},
@@ -352,7 +399,7 @@ func (s *captchaV2Session) fetchDebugInfo(scriptURL string) (string, error) {
 	}
 	body, err := s.doRaw(fhttp.MethodGet, scriptURL, nil, map[string]string{
 		"Accept":  "text/javascript,*/*",
-		"Referer": "https://id.vk.com/",
+		"Referer": s.origin + "/",
 	})
 	if err != nil {
 		return "", err
@@ -369,8 +416,8 @@ func (s *captchaV2Session) fetchDebugInfo(scriptURL string) (string, error) {
 func (s *captchaV2Session) captchaRequest(method string, form [][2]string) (map[string]any, error) {
 	endpoint := "https://api.vk.ru/method/" + method + "?v=" + captchaV2APIVersion
 	body, err := s.doRaw(fhttp.MethodPost, endpoint, form, map[string]string{
-		"Origin":   "https://id.vk.com",
-		"Referer":  "https://id.vk.com/",
+		"Origin":   s.origin,
+		"Referer":  s.origin + "/",
 		"Priority": "u=1, i",
 	})
 	if err != nil {
@@ -397,8 +444,11 @@ func (s *captchaV2Session) doRaw(method, endpoint string, form [][2]string, extr
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Origin", "https://vk.com")
-	req.Header.Set("Referer", "https://vk.com/")
+	// Дефолт — сайт, который встроил капчу (s.domain из redirect_uri), а не
+	// константа vk.com. captchaRequest/fetchDebugInfo перебивают это на origin
+	// самой captcha-страницы через extraHeaders.
+	req.Header.Set("Origin", "https://"+s.domain)
+	req.Header.Set("Referer", "https://"+s.domain+"/")
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -429,13 +479,14 @@ func parseCaptchaV2Page(html string) (*captchaV2Page, error) {
 	page := &captchaV2Page{}
 
 	if m := reCaptchaV2WindowInit.FindStringSubmatch(html); len(m) >= 2 {
-		var init struct {
-			Data struct {
-				ShowCaptchaType string `json:"show_captcha_type"`
-			} `json:"data"`
-		}
+		var init map[string]any
 		if err := json.Unmarshal([]byte(m[1]), &init); err == nil {
-			page.ShowType = init.Data.ShowCaptchaType
+			if data, ok := init["data"].(map[string]any); ok {
+				page.ShowType, _ = data["show_captcha_type"].(string)
+				// Обёртка в {"response": …} — чтобы совпасть с формой ответа
+				// captchaNotRobot.settings, которую разбирает extractSliderSettings.
+				page.Settings = map[string]any{"response": data}
+			}
 		}
 	}
 
@@ -545,10 +596,10 @@ func captchaV2RandomBrowserFP() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-func captchaV2BaseValues(sessionToken string) [][2]string {
+func captchaV2BaseValues(sessionToken, domain string) [][2]string {
 	return [][2]string{
 		{"session_token", sessionToken},
-		{"domain", "vk.com"},
+		{"domain", domain},
 		{"adFp", ""},
 		{"access_token", ""},
 	}

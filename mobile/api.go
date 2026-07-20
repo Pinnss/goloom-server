@@ -45,6 +45,7 @@ import (
 	"github.com/Pinnss/goloom-server/internal/session"
 	"github.com/Pinnss/goloom-server/internal/tunnel"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 )
 
 // SocketProtector lets the native side mark sockets as bypass-VPN.
@@ -114,7 +115,15 @@ type Client struct {
 	// файл, и следующие auth ladder'ы идут через replay вместо
 	// показа WebView. После 2-3 ручных solve'ов captcha исчезает.
 	vkProfileStorePath string
-	lastErr            error
+	// captchaNative — активный solver ручной captcha. Держим ссылку, чтобы
+	// [Client.SubmitVKCaptchaToken] мог отдать ему token, пришедший из
+	// WebView через JS-мост.
+	captchaNative *vkauth.NativeCaptchaSolver
+	// captchaStore — пул отпечатков. Держим ссылку, чтобы
+	// [Client.SubmitVKCaptchaProfile] мог сложить туда отпечаток, снятый
+	// native-стороной со страницы captcha.
+	captchaStore *vkauth.ProfileStore
+	lastErr      error
 
 	// sessionDone сигнализирует supervisor'у конец текущей сессии. Канал
 	// обновляется на каждую новую runSession (peer rehandshake / retry).

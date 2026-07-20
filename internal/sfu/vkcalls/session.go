@@ -168,11 +168,16 @@ func (s *Session) ICEHosts() []string {
 	// Static helpers — auth + signaling endpoints we hit before the
 	// dynamic TURN/STUN list is known. Hard-coded so VPN clients can
 	// pre-exclude them at default-route capture time.
+	// Оба домена: VK мигрирует vk.com -> vk.ru поэтапно (см. ResolveSFUIPs).
 	for _, h := range []string{
+		"vk.ru",
 		"vk.com",
-		"id.vk.com",
 		"id.vk.ru",
+		"id.vk.com",
+		"static.vk.ru",
+		"ad.mail.ru",
 		"login.vk.ru",
+		"api.vk.ru",
 		"api.vk.com",
 		"calls.okcdn.ru",
 		"videowebrtc.okcdn.ru",

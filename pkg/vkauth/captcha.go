@@ -399,7 +399,7 @@ func mountHandlers(mux *http.ServeMux, urlBase string, mnt *proxyMount) {
 			Rewrite: func(req *httputil.ProxyRequest) {
 				req.Out.URL.Path = parsed.Path
 				req.Out.URL.RawQuery = parsed.RawQuery
-				rewriteGenericProxy(req.Out, parsed)
+				rewriteGenericProxy(req.Out, parsed, mnt)
 			},
 		}).ServeHTTP(w, r)
 	})
@@ -474,12 +474,60 @@ func rewriteProxyRequest(req *http.Request, mnt *proxyMount, urlBase string) {
 	}
 }
 
-func rewriteGenericProxy(req *http.Request, target *neturl.URL) {
+func rewriteGenericProxy(req *http.Request, target *neturl.URL, mnt *proxyMount) {
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 	req.Host = target.Host
 	req.Header.Del("Accept-Encoding")
 	req.Header.Del("TE")
+
+	// The WebView believes it is on http://localhost:<port>, so it labels these
+	// requests with OUR origin — captured live on 2026-07-20 hitting api.vk.ru
+	// with `Referer: http://localhost:39169/not_robot_captcha?…session_token=…`.
+	// Handing VK's antifraud a localhost referer (and leaking the session token
+	// into it) is a plain bot signal. Present the captcha's real upstream origin
+	// instead, derived from the target so this tracks VK's vk.com -> vk.ru
+	// migration on its own.
+	//
+	// Origin-only, no path: id.vk.* -> api.vk.* is cross-origin, where a browser
+	// under the default referrer policy sends the bare origin. The catch-all
+	// proxy path does the equivalent via [rewriteProxyHeaderURL]; generic_proxy
+	// forwarded these verbatim until now.
+	captchaOrigin := targetOrigin(mnt.target)
+	req.Header.Set("Referer", captchaOrigin+"/")
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		req.Header.Set("Origin", captchaOrigin)
+	} else {
+		req.Header.Del("Origin")
+	}
+
+	// Sec-Fetch-Site должен согласовываться с подставленным выше Origin.
+	// WebView считает себя на localhost и шлёт same-origin — вместе с
+	// Origin: id.vk.ru это самопротиворечие (origin id.vk.ru, хост api.vk.ru,
+	// а заголовок говорит «тот же origin»). Настоящий браузер прислал бы
+	// same-site для vk.ru -> vk.ru и cross-site для ad.mail.ru.
+	if sameSite(mnt.target.Host, target.Host) {
+		req.Header.Set("Sec-Fetch-Site", "same-site")
+	} else {
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+	}
+}
+
+// sameSite сравнивает хосты по двум последним меткам (id.vk.ru vs api.vk.ru →
+// true; id.vk.ru vs ad.mail.ru → false). Публичного суффикс-листа тут не надо:
+// все хосты этого флоу — обычные домены второго уровня.
+func sameSite(a, b string) bool {
+	reg := func(h string) string {
+		if i := strings.IndexByte(h, ':'); i >= 0 {
+			h = h[:i] // отрезаем порт
+		}
+		parts := strings.Split(strings.ToLower(h), ".")
+		if len(parts) < 2 {
+			return h
+		}
+		return strings.Join(parts[len(parts)-2:], ".")
+	}
+	return reg(a) == reg(b)
 }
 
 func rewriteProxyHeaderURL(raw string, mnt *proxyMount) string {
@@ -581,13 +629,26 @@ func rewriteCaptchaHTML(html string, mnt *proxyMount, urlBase string) string {
 <script>
 (function() {
     var selfBase = %q;          // "http://localhost:1234" or "/captcha-proxy/<id>"
-    var upstreamOrigin = %q;    // "https://id.vk.com"
+    var upstreamOrigin = %q;    // captcha origin, derived: "https://id.vk.ru"
     var tokenPath = %q;         // POST endpoint for captured success_token
     var genericPath = %q;       // generic-proxy escape hatch
 
+    function isOurHost(s) {
+        try { return new URL(s, window.location.href).host === window.location.host; }
+        catch (e) { return false; }
+    }
     function rewriteUrl(s) {
         if (!s || typeof s !== 'string') return s;
-        if (selfBase && s.indexOf(selfBase) === 0) return s;
+        // Match on HOST, not on the selfBase prefix: VK handed back its FAQ link
+        // as https://localhost:<port>/about/faq/… (https, while selfBase is http),
+        // so a prefix test missed it, the URL got wrapped in generic_proxy a
+        // second time, the proxy fetched itself and returned 502.
+        if (isOurHost(s)) {
+            try {
+                var u = new URL(s, window.location.href);
+                return selfBase + u.pathname + u.search + u.hash;
+            } catch (e) { return s; }
+        }
         if (s.indexOf(upstreamOrigin) === 0) return selfBase + s.slice(upstreamOrigin.length);
         if (s.indexOf('//') === 0) return genericPath + '?proxy_url=' + encodeURIComponent(window.location.protocol + s);
         if (s.indexOf('http://') === 0 || s.indexOf('https://') === 0) return genericPath + '?proxy_url=' + encodeURIComponent(s);

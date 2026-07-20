@@ -125,13 +125,17 @@ func (s *VP8Session) ICEHosts() []string {
 		add(u)
 	}
 	add(s.auth.WSEndpoint)
+	// Оба домена: VK мигрирует vk.com -> vk.ru поэтапно (см. ResolveSFUIPs).
 	for _, h := range []string{
+		"vk.ru",
 		"vk.com",
-		"id.vk.com",
 		"id.vk.ru",
+		"id.vk.com",
+		"static.vk.ru",
+		"ad.mail.ru",
 		"login.vk.ru",
-		"api.vk.com",
 		"api.vk.ru",
+		"api.vk.com",
 		"calls.okcdn.ru",
 		"videowebrtc.okcdn.ru",
 	} {

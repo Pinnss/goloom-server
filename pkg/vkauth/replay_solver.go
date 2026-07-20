@@ -39,37 +39,54 @@ import (
 // (реальный сетевой replay через VK API).
 var autoSolve = SolveCaptchaV2
 
+// profileID — ID профиля для логов; "fresh" когда пул был пуст и авто-солвер
+// шёл без сохранённого профиля.
+func profileID(p *CapturedProfile) string {
+	if p == nil {
+		return "fresh"
+	}
+	return p.ID
+}
+
 func WithReplaySolver(store *ProfileStore, base sfu.VKCaptchaSolver, lg *log.Logger) sfu.VKCaptchaSolver {
 	if store == nil {
 		return base
 	}
 	return func(ctx context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
+		// Пустой пул — НЕ повод пропускать авто-солвер. SolveCaptchaV2
+		// работает и с saved == nil (captchaV2DefaultDevice + свежий
+		// случайный browser_fp), а главное — он ходит через tls-client с
+		// правильным JA3 и порядком заголовков. Интерактивный WebView
+		// проксируется голым stdlib net/http, и на 2026-07-20 VK отдаёт
+		// на его captchaNotRobot.check вердикт status=BOT. Поэтому сперва
+		// всегда пробуем авто-путь, а WebView оставляем как fallback.
 		picked := store.Pick()
-		if picked == nil {
-			if lg != nil {
-				lg.Printf("vkcalls/captcha-replay: pool empty, falling back to interactive solver")
-			}
-			return base(ctx, ch)
-		}
 		if lg != nil {
-			lg.Printf("vkcalls/captcha-replay: trying profile %s (success=%d fail=%d ua=%s)",
-				picked.ID, picked.Successes, picked.Failures, shortUA(picked.UserAgent))
+			if picked != nil {
+				lg.Printf("vkcalls/captcha-replay: trying profile %s (success=%d fail=%d ua=%s)",
+					picked.ID, picked.Successes, picked.Failures, shortUA(picked.UserAgent))
+			} else {
+				lg.Printf("vkcalls/captcha-replay: pool empty, trying auto-solve with a fresh profile")
+			}
 		}
 		token, err := autoSolve(ctx, ch, PickProfile(), picked, lg)
 		if err == nil {
-			store.MarkSuccess(picked.ID)
+			if picked != nil {
+				store.MarkSuccess(picked.ID)
+			}
 			if lg != nil {
-				lg.Printf("vkcalls/captcha-replay: ✓ profile %s succeeded", picked.ID)
+				lg.Printf("vkcalls/captcha-replay: ✓ auto-solve succeeded (profile=%s)", profileID(picked))
 			}
 			return sfu.VKCaptchaSolution{SuccessToken: token}, nil
 		}
 		// На slider ProfileStore не виноват — сам challenge другой
 		// разновидности. Не штрафуем профиль, просто fallback.
-		if !errors.Is(err, ErrSliderUnsupported) {
+		if picked != nil && !errors.Is(err, ErrSliderUnsupported) {
 			store.MarkFail(picked.ID)
 		}
 		if lg != nil {
-			lg.Printf("vkcalls/captcha-replay: profile %s failed (%v), falling back to interactive", picked.ID, err)
+			lg.Printf("vkcalls/captcha-replay: auto-solve failed (profile=%s: %v), falling back to interactive",
+				profileID(picked), err)
 		}
 		// ctx может быть исчерпан replay-attempt'ом; для fallback
 		// пройти по нему ещё раз.

@@ -63,14 +63,63 @@ func TestWithReplaySolver_RefreshesChallengeOnFallback(t *testing.T) {
 	}
 }
 
-// With an empty pool there is no auto attempt, so the original session
-// is still fresh — the solver must hand it straight to base and must
-// NOT burn a refresh.
-func TestWithReplaySolver_EmptyPoolUsesOriginalChallenge(t *testing.T) {
+// Пустой пул больше не пропускает авто-солвер: SolveCaptchaV2 умеет работать
+// с saved == nil и ходит через tls-client с корректным JA3, тогда как
+// интерактивный WebView проксируется stdlib net/http и получает от VK BOT.
+// Проверяем, что авто-попытка ДЕЛАЕТСЯ и что saved при этом nil.
+func TestWithReplaySolver_EmptyPoolStillTriesAutoSolve(t *testing.T) {
 	s, err := NewProfileStore(ProfileStoreOptions{Path: filepath.Join(t.TempDir(), "p.json")})
 	if err != nil {
 		t.Fatalf("NewProfileStore: %v", err)
 	}
+
+	autoCalled := false
+	orig := autoSolve
+	autoSolve = func(_ context.Context, _ sfu.VKCaptchaChallenge, _ BrowserProfile, saved *CapturedProfile, _ *log.Logger) (string, error) {
+		autoCalled = true
+		if saved != nil {
+			t.Errorf("empty pool must pass saved=nil, got %+v", saved)
+		}
+		return "AUTOTOK", nil
+	}
+	defer func() { autoSolve = orig }()
+
+	baseCalled := false
+	base := func(context.Context, sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
+		baseCalled = true
+		return sfu.VKCaptchaSolution{SuccessToken: "TOK"}, nil
+	}
+	ch := sfu.VKCaptchaChallenge{Sid: "orig-sid", SessionToken: "orig-st"}
+
+	sol, err := WithReplaySolver(s, base, nil)(context.Background(), ch)
+	if err != nil {
+		t.Fatalf("solver error: %v", err)
+	}
+	if !autoCalled {
+		t.Fatal("auto-solve must be attempted even with an empty pool")
+	}
+	if baseCalled {
+		t.Fatal("interactive fallback must not run when auto-solve succeeds")
+	}
+	if sol.SuccessToken != "AUTOTOK" {
+		t.Fatalf("token = %q, want AUTOTOK", sol.SuccessToken)
+	}
+}
+
+// Когда авто-попытка на пустом пуле проваливается, она уже сожгла
+// session_token, поэтому интерактивный fallback ОБЯЗАН получить свежий
+// challenge — иначе WebView покажет пустую страницу.
+func TestWithReplaySolver_EmptyPoolRefreshesAfterAutoSolveFailure(t *testing.T) {
+	s, err := NewProfileStore(ProfileStoreOptions{Path: filepath.Join(t.TempDir(), "p.json")})
+	if err != nil {
+		t.Fatalf("NewProfileStore: %v", err)
+	}
+
+	orig := autoSolve
+	autoSolve = func(context.Context, sfu.VKCaptchaChallenge, BrowserProfile, *CapturedProfile, *log.Logger) (string, error) {
+		return "", errors.New("bot")
+	}
+	defer func() { autoSolve = orig }()
 
 	var baseGot sfu.VKCaptchaChallenge
 	base := func(_ context.Context, ch sfu.VKCaptchaChallenge) (sfu.VKCaptchaSolution, error) {
@@ -82,7 +131,7 @@ func TestWithReplaySolver_EmptyPoolUsesOriginalChallenge(t *testing.T) {
 		Sid: "orig-sid", SessionToken: "orig-st",
 		Refresh: func(context.Context) (sfu.VKCaptchaChallenge, error) {
 			refreshCalled = true
-			return sfu.VKCaptchaChallenge{}, nil
+			return sfu.VKCaptchaChallenge{Sid: "fresh-sid", SessionToken: "fresh-st", Ts: 222, Attempt: "2"}, nil
 		},
 	}
 
@@ -90,11 +139,11 @@ func TestWithReplaySolver_EmptyPoolUsesOriginalChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("solver error: %v", err)
 	}
-	if refreshCalled {
-		t.Fatal("empty pool must not refresh — original session is unspent")
+	if !refreshCalled {
+		t.Fatal("spent session must be refreshed before the interactive fallback")
 	}
-	if baseGot.SessionToken != "orig-st" {
-		t.Fatalf("base got %+v, want original", baseGot)
+	if baseGot.SessionToken != "fresh-st" {
+		t.Fatalf("base got %+v, want the refreshed challenge", baseGot)
 	}
 	if sol.SuccessToken != "TOK" {
 		t.Fatalf("token = %q", sol.SuccessToken)

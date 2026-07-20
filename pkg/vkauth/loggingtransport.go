@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // CaptureSink — куда сбрасываются перехваченные fingerprint'ы.
@@ -43,6 +44,17 @@ type loggingTransport struct {
 	base http.RoundTripper
 	sink CaptureSink
 	lg   *log.Logger
+
+	// VK раскладывает отпечаток по ДВУМ запросам: `device` приезжает в
+	// componentDone, `browser_fp` — в check. А [ProfileStore.Capture]
+	// молча игнорирует профиль, если пусто хоть одно поле. Поэтому
+	// поштучные Capture были no-op'ами и пул не наполнялся НИКОГДА
+	// (симптом: «0 profiles» после десятков ручных решений). Копим
+	// половинки здесь и отдаём в sink, когда собрались обе.
+	mu      sync.Mutex
+	partUA  string
+	partDev string
+	partBFP string
 }
 
 // NewLoggingTransport возвращает обёртку. base = http транспорт,
@@ -110,11 +122,28 @@ func (t *loggingTransport) sniffRequest(req *http.Request) {
 	t.logf("captured fingerprint via %s (device=%dB browser_fp=%dB ua=%s)",
 		captchaPathTag(req.URL.Path), len(device), len(bfp), shortUA(ua))
 
-	t.sink.Capture(CapturedProfile{
-		UserAgent:  ua,
-		DeviceJSON: device,
-		BrowserFP:  bfp,
-	})
+	// Досылаем в sink только когда собраны обе половины — иначе Capture
+	// молча отбросит профиль (см. комментарий у полей part*).
+	t.mu.Lock()
+	if ua != "" {
+		t.partUA = ua
+	}
+	if device != "" {
+		t.partDev = device
+	}
+	if bfp != "" {
+		t.partBFP = bfp
+	}
+	complete := t.partUA != "" && t.partDev != "" && t.partBFP != ""
+	profile := CapturedProfile{UserAgent: t.partUA, DeviceJSON: t.partDev, BrowserFP: t.partBFP}
+	t.mu.Unlock()
+
+	if !complete {
+		return
+	}
+	t.logf("fingerprint complete → pool (device=%dB browser_fp=%dB)",
+		len(profile.DeviceJSON), len(profile.BrowserFP))
+	t.sink.Capture(profile)
 }
 
 func (t *loggingTransport) logf(format string, args ...interface{}) {

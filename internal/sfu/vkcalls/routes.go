@@ -19,14 +19,22 @@ import (
 // records across the well-known VK auth + signaling hosts. Errors
 // only when zero IPs could be resolved.
 func ResolveSFUIPs() ([]net.IP, error) {
+	// VK мигрирует vk.com -> vk.ru, причём вразнобой: на 2026-07-20 капча
+	// уже отдаётся с id.vk.ru + static.vk.ru, а domain= в redirect_uri всё
+	// ещё vk.com. Держим ОБА набора — лишний хост стоит одного DNS-запроса,
+	// а пропущенный роняет auth до поднятия туннеля.
 	hosts := []string{
 		"login.vk.ru",          // step 0 — anonym seed token
-		"api.vk.com",           // step 1 — calls.getAnonymousToken
-		"id.vk.com",            // captcha redirect target
-		"id.vk.ru",             // captcha redirect alias
+		"api.vk.ru",            // step 1 — calls.getAnonymousToken (актуальный)
+		"api.vk.com",           // step 1 — legacy алиас
+		"id.vk.ru",             // captcha redirect target
+		"id.vk.com",            // captcha redirect, legacy алиас
+		"static.vk.ru",         // captcha JS-бандл (not_robot_captcha.js)
+		"ad.mail.ru",           // sync-loader.js — источник adFp для капчи
 		"calls.okcdn.ru",       // step 2/3 — anonymLogin + joinByLink
 		"videowebrtc.okcdn.ru", // signaling WSS
-		"vk.com",               // generic, used as Origin/Referer
+		"vk.ru",                // generic, used as Origin/Referer
+		"vk.com",               // generic, legacy алиас
 	}
 
 	var allIPs []net.IP
