@@ -174,9 +174,11 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 }
 
 // SubmitVKCaptchaToken принимает success_token, который native-сторона
-// выцепила из ответа captchaNotRobot.check в WebView. Вызывается из Kotlin
-// через JS-мост; безопасен если никто не ждёт токен.
-func (c *Client) SubmitVKCaptchaToken(token string) {
+// выцепила из ответа captchaNotRobot.check в WebView. pageURL — адрес
+// страницы, с которой снят токен: по нему solver отсекает токены с уже
+// протухшей попытки. Вызывается из Kotlin через JS-мост; безопасен если
+// никто не ждёт токен.
+func (c *Client) SubmitVKCaptchaToken(token, pageURL string) {
 	c.mu.Lock()
 	native := c.captchaNative
 	c.mu.Unlock()
@@ -184,7 +186,7 @@ func (c *Client) SubmitVKCaptchaToken(token string) {
 		c.logger.Printf("vkcalls/captcha-native: token submitted before solver was built — ignored")
 		return
 	}
-	native.Submit(token)
+	native.Submit(token, pageURL)
 }
 
 // SubmitVKCaptchaProfile складывает в пул отпечаток, снятый native-стороной со

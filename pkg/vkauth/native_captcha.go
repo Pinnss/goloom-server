@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/url"
 	"sync"
 	"time"
 
@@ -42,6 +43,9 @@ type NativeCaptchaSolver struct {
 
 	mu sync.Mutex
 	ch chan string // не nil только пока Solve ждёт токен
+	// sessionToken — session_token активной попытки; по нему [Submit]
+	// отсекает токены, снятые с уже протухшей страницы captcha.
+	sessionToken string
 }
 
 // NewNativeCaptchaSolver. open вызывается с VK'шным URL как есть; timeout —
@@ -53,24 +57,52 @@ func NewNativeCaptchaSolver(timeout time.Duration, lg *log.Logger, open func(str
 	return &NativeCaptchaSolver{timeout: timeout, lg: lg, open: open}
 }
 
-// Submit принимает success_token от native-стороны. Безопасно звать когда
-// никто не ждёт (пользователь решил капчу после таймаута) и повторно —
-// лишние вызовы отбрасываются.
-func (s *NativeCaptchaSolver) Submit(token string) {
+// Submit принимает success_token от native-стороны. pageURL — адрес страницы
+// captcha, с которой токен снят; по нему токен сверяется с активной попыткой.
+//
+// Безопасно звать когда никто не ждёт (пользователь дорешал капчу после
+// таймаута) и повторно — лишние вызовы отбрасываются.
+func (s *NativeCaptchaSolver) Submit(token, pageURL string) {
 	if token == "" {
 		return
 	}
 	s.mu.Lock()
-	ch := s.ch
+	ch, want := s.ch, s.sessionToken
 	s.mu.Unlock()
 	if ch == nil {
 		s.logf("captcha-native: token submitted with no solver waiting — ignored")
 		return
 	}
+
+	// Токен обязан принадлежать ТЕКУЩЕЙ попытке. Иначе: пользователь возится
+	// дольше таймаута, Solve #1 отваливается, супервизор поднимает Solve #2 с
+	// НОВЫМ session_token и открывает второе окно — а пользователь дорешивает
+	// первое, ещё открытое. Без сверки протухший токен уехал бы в Solve #2 и
+	// вернулся как решение свежего challenge'а: VK ответил бы «captcha replay
+	// still failed», а настоящее решение из второго окна пропало.
+	if got := sessionTokenFromURL(pageURL); want != "" && got != "" && got != want {
+		s.logf("captcha-native: token from a stale captcha page — ignored (page session_token differs)")
+		return
+	}
+
 	select {
 	case ch <- token:
 	default: // уже получили токен
 	}
+}
+
+// sessionTokenFromURL достаёт query-параметр session_token. Пустая строка —
+// «не удалось определить»; вызывающий тогда не блокирует токен, чтобы кривой
+// URL не ломал рабочий сценарий.
+func sessionTokenFromURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("session_token")
 }
 
 // Solve — точка входа в виде [sfu.VKCaptchaSolver].
@@ -82,6 +114,7 @@ func (s *NativeCaptchaSolver) Solve(ctx context.Context, ch sfu.VKCaptchaChallen
 	tokens := make(chan string, 1)
 	s.mu.Lock()
 	s.ch = tokens
+	s.sessionToken = sessionTokenFromURL(ch.RedirectURI)
 	s.mu.Unlock()
 	defer func() {
 		// Compare-and-clear: если эта попытка отвалилась по таймауту, а вызывающий
