@@ -14,7 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -158,16 +162,18 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	// paced at 3 Mbps; the controller ramps up while loss stays near zero and
 	// backs off the moment it climbs. 2026-07-22 — added after the NACK-storm
 	// root cause was confirmed on the bench stand.
-	// Cap the send rate LOW. Our CC only sees the server→SFU leg (clean, ramps
-	// to 40 Mbps), but the real bottleneck is the SFU→phone MOBILE leg (~1-2
-	// Mbps). Flooding 40 Mbps into a ~1.5 Mbps mobile forward leg makes the SFU
-	// shred ~95% of our (non-adaptive) stream → the phone gets a trickle, and the
-	// overshoot loss also triggers the SFU's ~60s forwarding cutoff. Capping at a
-	// plausible-mobile rate lets the SFU forward the whole stream cleanly; excess
-	// WG data drops locally and inner TCP-over-WG adapts. 2026-07-23 — raise once
-	// confirmed traffic flows; a working 1.5 Mbps beats a shredded 40 Mbps.
-	rateCtl := tunnel.NewRateController(1_200_000)
-	rateCtl.MaxBps = 1_500_000
+	// The cap is deliberately low. Our CC only sees the server→SFU leg (clean,
+	// ramps to 40 Mbps), while the real bottleneck is the SFU→subscriber leg —
+	// ~1-2 Mbps to a phone on mobile data. Offering 40 Mbps into that made the
+	// SFU shred ~95% of our (non-adaptive) stream. Excess tunnel data is dropped
+	// in the local sender queue instead, leaving no wire gap, and inner
+	// TCP-over-WG adapts. 2026-09-26: with the media binding now holding, a run
+	// sat at the cap with lossEMA=0.00% and no drops, so the cap — not loss — is
+	// the ceiling; GOLOOM_MAX_MBPS raises it per run to find the real one.
+	maxBps := envBps("GOLOOM_MAX_MBPS", 1_500_000)
+	rateCtl := tunnel.NewRateController(math.Min(1_200_000, maxBps))
+	rateCtl.MaxBps = maxBps
+	lg.Printf("CC cap=%.2f Mbps (GOLOOM_MAX_MBPS)", maxBps/1e6)
 	cameraSender.SetRateLimit(uint64(rateCtl.Target()))
 	onTWCC := func(delivered, lost int) {
 		cameraSender.SetRateLimit(uint64(rateCtl.Observe(delivered, lost)))
@@ -396,4 +402,18 @@ func (s *Session) signalDone(err error) {
 			close(s.incoming)
 		}()
 	})
+}
+
+// envBps reads a megabit-per-second value from the environment and returns it
+// in bits per second, falling back to def when unset or unparseable.
+func envBps(key string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	mbps, err := strconv.ParseFloat(v, 64)
+	if err != nil || mbps <= 0 {
+		return def
+	}
+	return mbps * 1e6
 }
