@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -49,6 +50,18 @@ type Client struct {
 	handler     IncomingHandler
 	pendingAcks map[string]time.Time // uid -> sent_at, drained on incoming ack
 	lastRecv    time.Time            // last successful WS read; liveness heartbeat
+
+	// ackWaiters lets a caller block until the SFU acks one specific message.
+	// Only Leave uses it; everything else is fire-and-forget.
+	ackWaiters map[string]chan struct{}
+
+	// writeMu serializes socket writes: Leave writes directly, bypassing
+	// sendQ, and must not race writeLoop.
+	writeMu sync.Mutex
+
+	// readAlive reports whether readLoop is still running, i.e. whether an
+	// ack can still be observed.
+	readAlive atomic.Bool
 
 	pingTicker      *time.Ticker
 	telemetryTicker *time.Ticker
@@ -101,6 +114,7 @@ func (c *Client) OnIncoming(h IncomingHandler) { c.handler = h }
 // Start launches the read and write goroutines. Returns immediately. The
 // goroutines exit when ctx is cancelled or the WS errors.
 func (c *Client) Start(ctx context.Context) {
+	c.readAlive.Store(true)
 	go c.writeLoop(ctx)
 	go c.readLoop(ctx)
 }
@@ -223,11 +237,83 @@ func (c *Client) recordPending(env Envelope) {
 	c.mu.Unlock()
 }
 
-// matchAck removes an entry from pendingAcks when its server-side ack arrives.
+// matchAck removes an entry from pendingAcks when its server-side ack arrives,
+// and wakes anyone waiting on that uid.
 func (c *Client) matchAck(uid string) {
 	c.mu.Lock()
 	delete(c.pendingAcks, uid)
+	if ch, ok := c.ackWaiters[uid]; ok {
+		delete(c.ackWaiters, uid)
+		close(ch)
+	}
 	c.mu.Unlock()
+}
+
+// Leave tells the SFU we are going away, and waits up to timeout for its ack.
+//
+// Without it the SFU keeps our participant in the room as a ghost publisher for
+// ~8-9 minutes (measured 2026-09-26). A ghost is not harmless: it stays in the
+// room description, so the SFU can bind a subscriber's slot to it — a dead
+// publisher that sends nothing — and that subscriber then never sees our media.
+// Every restart used to leave one behind, which is the most likely explanation
+// for rooms that "degraded" until they were replaced.
+//
+// Call it BEFORE closing the WS; after Close it is a no-op. The frame goes
+// straight to the socket rather than through sendQ: teardown cancels the session
+// context first, so writeLoop is usually gone by the time we get here and
+// anything left in the queue would never be written.
+func (c *Client) Leave(timeout time.Duration) {
+	uid := uuid.NewString()
+	ch := make(chan struct{})
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if c.ackWaiters == nil {
+		c.ackWaiters = make(map[string]chan struct{})
+	}
+	c.ackWaiters[uid] = ch
+	c.mu.Unlock()
+
+	dropWaiter := func() {
+		c.mu.Lock()
+		delete(c.ackWaiters, uid)
+		c.mu.Unlock()
+	}
+
+	env := Envelope{UID: uid, Leave: &Leave{}}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		dropWaiter()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c.writeMu.Lock()
+	err = c.ws.Write(ctx, websocket.MessageText, raw)
+	c.writeMu.Unlock()
+	if err != nil {
+		c.log.Printf("leave write: %v", err)
+		dropWaiter()
+		return
+	}
+	c.logSend(env, raw)
+
+	// With no live reader an ack can never arrive, so don't stall teardown.
+	if !c.readAlive.Load() {
+		dropWaiter()
+		c.log.Printf("LEAVE sent (reader already gone, ack not awaited)")
+		return
+	}
+	select {
+	case <-ch:
+		c.log.Printf("LEAVE acked — room released, no ghost participant")
+	case <-ctx.Done():
+		dropWaiter()
+		c.log.Printf("LEAVE not acked within %v — the SFU may hold a ghost participant", timeout)
+	}
 }
 
 func (c *Client) writeLoop(ctx context.Context) {
@@ -236,7 +322,10 @@ func (c *Client) writeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-c.sendQ:
-			if err := c.ws.Write(ctx, websocket.MessageText, msg); err != nil {
+			c.writeMu.Lock()
+			err := c.ws.Write(ctx, websocket.MessageText, msg)
+			c.writeMu.Unlock()
+			if err != nil {
 				c.log.Printf("ws write err: %v", err)
 				return
 			}
@@ -245,6 +334,7 @@ func (c *Client) writeLoop(ctx context.Context) {
 }
 
 func (c *Client) readLoop(ctx context.Context) {
+	defer c.readAlive.Store(false)
 	for {
 		_, data, err := c.ws.Read(ctx)
 		if err != nil {

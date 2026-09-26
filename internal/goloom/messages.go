@@ -28,6 +28,7 @@ type Envelope struct {
 	Ping                            *Ping                            `json:"ping,omitempty"`
 	UpdatePublisherTrackDescription *UpdatePublisherTrackDescription `json:"updatePublisherTrackDescription,omitempty"`
 	UpdateMe                        *UpdateMe                        `json:"updateMe,omitempty"`
+	Leave                           *Leave                           `json:"leave,omitempty"`
 }
 
 // ParticipantMeta is the active state portion of a participant identity.
@@ -234,6 +235,10 @@ type UpdatePublisherTrackDescription struct {
 
 // UpdateMe lets us mutate our participant flags after hello (mute/unmute,
 // camera off, etc). Not used in PoC #1 directly.
+// Leave tells the SFU to drop our participant now instead of letting it time
+// out as a ghost. The wire form is an empty object: {"uid":…,"leave":{}}.
+type Leave struct{}
+
 type UpdateMe struct {
 	ParticipantMeta       ParticipantMeta `json:"participantMeta"`
 	ParticipantAttributes ParticipantAttr `json:"participantAttributes"`

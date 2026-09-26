@@ -20,6 +20,12 @@ import (
 	"github.com/Pinnss/goloom-server/internal/peer"
 )
 
+// leaveAckWait bounds how long Close waits for the SFU to ack our leave. The
+// frame itself is written synchronously, so this only covers the ack, which the
+// SFU sends inconsistently (measured 2026-09-26: sometimes within ms, often not
+// at all). Keep it short — every rx-stall retry pays it.
+const leaveAckWait = time.Second
+
 // Session holds everything the test phases need after connect.
 type Session struct {
 	Logger            *log.Logger
@@ -67,18 +73,23 @@ type Session struct {
 //
 // Close order matters for "no zombie peer" behaviour:
 //
-//  1. Close the WebSocket first — that's the signalling channel the SFU
-//     uses to track participant presence. Once we send a normal-closure
-//     close frame, the SFU drops us from the room immediately, BEFORE
-//     waiting for ICE/DTLS timeouts on the media side.
-//  2. Then close PeerConnections (DTLS close_notify). ICE state will
+//  1. Say leave, so the SFU drops our participant right away rather than
+//     keeping it as a ghost publisher for minutes (a subscriber can bind its
+//     slot to a ghost and then receive nothing).
+//  2. Close the WebSocket — the signalling channel the SFU tracks presence
+//     on — BEFORE waiting for ICE/DTLS timeouts on the media side.
+//  3. Then close PeerConnections (DTLS close_notify). ICE state will
 //     converge to "closed" on its own; without WS bye first the SFU
 //     would keep our peer slot warm for the full ICE timeout (~30s).
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
-		s.Logger.Printf("SESSION-CLOSE: ws bye → PCs (this order avoids SFU zombie peer)")
+		s.Logger.Printf("SESSION-CLOSE: leave → ws bye → PCs (this order avoids SFU zombie peer)")
 
 		if s.Client != nil {
+			// Release the room explicitly: a dropped WS alone leaves our
+			// participant behind for ~8-9 min, and a subscriber can bind its
+			// slot to that dead publisher and never receive our media.
+			s.Client.Leave(leaveAckWait)
 			if err := s.Client.Close(); err != nil {
 				s.Logger.Printf("SESSION-CLOSE: ws: %v", err)
 			}
