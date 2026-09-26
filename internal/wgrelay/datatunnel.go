@@ -65,7 +65,8 @@ type DataTunnel struct {
 
 	closed       bool
 	closeCh      chan struct{}
-	rehandshake  bool // set when we exit because the peer wanted to renegotiate
+	rehandshake  bool   // set when we exit because the peer wanted to renegotiate
+	peerID       string // peer this tunnel is paired with; see SetPeerID
 
 	// Atomic throughput counters — read by the supervisor's rx-stall
 	// watchdog (clients) and by Status() for live UI/admin metrics.
@@ -93,6 +94,29 @@ func New(sender *tunnel.Sender, frames <-chan tunnel.ReceivedFrame, lg *log.Logg
 		logger:  lg,
 		closeCh: make(chan struct{}),
 	}
+}
+
+// SetPeerID names the peer this tunnel was paired with, as returned by
+// [session.Handshake]. A late handshake frame carrying this id is then known to
+// belong to the current session and does not trigger a teardown. Leaving it
+// unset keeps the pre-2026-09 behaviour (any post-data handshake frame tears
+// the relay down).
+func (t *DataTunnel) SetPeerID(id string) {
+	t.mu.Lock()
+	t.peerID = id
+	t.mu.Unlock()
+}
+
+// isCurrentPeer reports whether a handshake frame payload ([round][peerID],
+// see session.Handshake) names the peer we are already relaying for.
+func (t *DataTunnel) isCurrentPeer(payload []byte) bool {
+	if len(payload) < 2 {
+		return false
+	}
+	t.mu.RLock()
+	id := t.peerID
+	t.mu.RUnlock()
+	return id != "" && string(payload[1:]) == id
 }
 
 // Run blocks reading frames from the receive channel and dispatching
@@ -130,8 +154,14 @@ func (t *DataTunnel) Run(ctx context.Context) {
 			//
 			// 2026-05-28: restored teardown (gated on gotFirstRx) after the
 			// 2026-05-27 blanket-ignore regressed client reconnection.
+			//   3. AFTER data has flowed, but the frame carries the peer id we
+			//      are already relaying for: a HELLO/ACK of the CURRENT
+			//      handshake that reached us late. Since 2026-09 the receiver
+			//      recovers NACKed packets and reassembles out of order, so a
+			//      handshake frame can be delivered after the first WG data.
+			//      Tearing down on it would re-pair a healthy session. → ignore.
 			if f.Flags.Has(tunnel.FlagHandshake) || f.Flags.Has(tunnel.FlagHandshakeAck) {
-				if !t.gotFirstRx.Load() {
+				if !t.gotFirstRx.Load() || t.isCurrentPeer(f.Payload) {
 					continue
 				}
 				t.mu.Lock()

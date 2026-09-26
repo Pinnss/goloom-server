@@ -920,6 +920,40 @@ func (s *Session) RebindSlots(ctx context.Context, key int) error {
 	return nil
 }
 
+// slotKeepaliveEvery is the steady-state setSlots cadence. The SFU expires our
+// subscription to the peer's video ~45 s after the last setSlots and stops
+// forwarding it (measured 2026-07-23). A sibling project pulses every 10 s after the
+// same 3/8/15 s burst and holds for hours; we used 25 s until 2026-09.
+const slotKeepaliveEvery = 10 * time.Second
+
+// RunSlotKeepalive renews the slot subscription for the life of ctx: setSlots
+// is re-sent after 3, 8 and 15 s, then every slotKeepaliveEvery. Keys climb
+// from firstKey so the SFU treats each message as the newest layout. It only
+// re-sends setSlots on the existing session: no re-join, no room churn.
+func (s *Session) RunSlotKeepalive(ctx context.Context, firstKey int) {
+	key := firstKey
+	for _, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+			_ = s.RebindSlots(ctx, key)
+			key++
+		}
+	}
+	t := time.NewTicker(slotKeepaliveEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = s.RebindSlots(ctx, key)
+			key++
+		}
+	}
+}
+
 // WaitForPeerScreenShareBinding consumes slotsCh until it sees a slot with
 // participantScreenSharingByMid for peerID. Returns the bound mid (e.g.
 // "video_AA"). Times out after timeout.

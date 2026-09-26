@@ -140,16 +140,7 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	// empty stub. The SFU demotes a publisher whose telemetry never shows a
 	// real encoder (~1-2 min), stopping video forwarding — measured 2026-07-22.
 	// Signalling-only; does not touch the handshake-carrying media path.
-	var videoSSRC uint32
-	for _, snd := range sess.Pub.PC.GetSenders() {
-		if snd.Track() == sess.VideoTrack {
-			if p := snd.GetParameters(); len(p.Encodings) > 0 {
-				videoSSRC = uint32(p.Encodings[0].SSRC)
-			}
-			break
-		}
-	}
-	sess.Client.SetTelemetryProvider(newPublisherStatsProvider(cameraSender, videoSSRC))
+	sess.Client.SetTelemetryProvider(session.NewPublisherStatsProvider(cameraSender, sess.Publisher()))
 
 	peerID, err := session.Handshake(ctx, lg, sess, cameraSender, merged, 1)
 	if err != nil {
@@ -196,39 +187,14 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	}()
 	session.StartRTCPLoop(ctx, lg, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, onTWCC)
 
-	// Slot-subscription keepalive. The SFU expires our subscription to the
-	// peer's video ~45s after the LAST setSlots and stops forwarding it — the
-	// downstream WG payload then freezes and the rx-stall watchdog re-pairs
-	// (measured 2026-07-23: last setSlots at +15s → peer media stops at +60s →
-	// inner WG handshake fails). So after the initial fast rebinds we must KEEP
-	// re-sending setSlots forever to renew the lease. RebindSlots just re-sends
-	// the setSlots message on the existing session (no re-join / no room churn).
-	// The key must keep climbing so the SFU treats each as the newest layout.
-	go func() {
-		key := 4
-		for _, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-				_ = sess.RebindSlots(ctx, key)
-				key++
-			}
-		}
-		t := time.NewTicker(25 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				_ = sess.RebindSlots(ctx, key)
-				key++
-			}
-		}
-	}()
+	// Slot-subscription keepalive: without it the SFU stops forwarding the
+	// peer's video ~45 s after the last setSlots (see RunSlotKeepalive).
+	go sess.RunSlotKeepalive(ctx, 4)
 
 	dt := wgrelay.New(cameraSender, merged, lg)
+	// Late HELLO/ACK frames of THIS handshake (recovered by NACK, or
+	// reassembled out of order) must not be mistaken for the peer restarting.
+	dt.SetPeerID(peerID)
 
 	s := &Session{
 		dt:           dt,

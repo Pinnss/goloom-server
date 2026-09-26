@@ -371,6 +371,11 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	cameraSender.WriteMu = videoWriteMu
 	cameraSender.Start()
 
+	// Live getStats-shaped telemetry instead of the empty `{}` stub: a sibling
+	// project measured that the stub trips an SFU validator (5 s of clean media vs 22 s
+	// without it). Until 2026-09 only the server side sent a real report.
+	sess.Client.SetTelemetryProvider(session.NewPublisherStatsProvider(cameraSender, sess.Publisher()))
+
 	c.emitPhase("handshake", "exchanging HELLO with peer")
 	peerID, err := session.Handshake(ctx, c.logger, sess, cameraSender, merged, 1)
 	if err != nil {
@@ -385,35 +390,14 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	// control is wired on the server publisher path (see internal/sfu/telemost).
 	session.StartRTCPLoop(ctx, c.logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, nil)
 
-	// Slot-subscription keepalive — see internal/sfu/telemost/transport.go for
-	// the full rationale. The SFU expires our subscription to the server's video
-	// ~45s after the last setSlots (measured 2026-07-23) and stops forwarding it,
-	// which freezes the WG payload and forces a re-pair. Renew every 25s forever.
-	go func() {
-		key := 4
-		for _, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-				sess.RebindSlots(ctx, key)
-				key++
-			}
-		}
-		t := time.NewTicker(25 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				sess.RebindSlots(ctx, key)
-				key++
-			}
-		}
-	}()
+	// Slot-subscription keepalive: without it the SFU stops forwarding the
+	// server's video ~45 s after the last setSlots (see RunSlotKeepalive).
+	go sess.RunSlotKeepalive(ctx, 4)
 
 	dt := wgrelay.New(cameraSender, merged, c.logger)
+	// Late HELLO/ACK frames of THIS handshake (recovered by NACK, or
+	// reassembled out of order) must not be mistaken for the peer restarting.
+	dt.SetPeerID(peerID)
 	joiner := wgrelay.NewJoiner(listenAddr, dt, c.logger)
 
 	go dt.Run(ctx)

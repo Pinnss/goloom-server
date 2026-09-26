@@ -38,6 +38,9 @@ type Receiver struct {
 	HeaderTooShort atomic.Uint64
 	HeaderBadStart atomic.Uint64
 	SideFiltered   atomic.Uint64 // count of frames dropped via DropFlag
+	PartialFrames  atomic.Uint64 // samples released with holes after the reassembly wait
+	ResyncFrames   atomic.Uint64 // tunnel frames salvaged from mid-sample fragments
+	LatePackets    atomic.Uint64 // packets for samples already released
 }
 
 func NewReceiver(bufSize int) *Receiver {
@@ -48,7 +51,8 @@ func (r *Receiver) Frames() <-chan ReceivedFrame { return r.out }
 
 func (r *Receiver) Run(ctx context.Context, track *webrtc.TrackRemote, lg *log.Logger) {
 	defer close(r.out)
-	var asm FrameAssembler
+	asm := NewReassembler()
+	var released []ReleasedFrame
 
 	// Media RTP sequence-gap tracking (2026-07-22). The SFU NACKs our publisher
 	// even when TWCC reports 0% transport loss — meaning it sees gaps in the
@@ -83,9 +87,10 @@ func (r *Receiver) Run(ctx context.Context, track *webrtc.TrackRemote, lg *log.L
 		}
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
-			lg.Printf("receiver track %s read end: %v (rtp_pkts=%d frames=%d bad_magic=%d strip_errs=%d decode_errs=%d partial_drops=%d hdr_short=%d hdr_bad=%d seq_gaps=%d seq_rewind=%d)",
+			lg.Printf("receiver track %s read end: %v (rtp_pkts=%d frames=%d bad_magic=%d strip_errs=%d decode_errs=%d samples_ok=%d samples_partial=%d resync=%d late=%d dups=%d hdr_short=%d hdr_bad=%d seq_gaps=%d seq_rewind=%d)",
 				track.ID(), err, r.RTPPackets.Load(), r.FramesPushed.Load(),
-				r.BadMagic.Load(), r.StripErrs.Load(), r.DecodeErrs.Load(), asm.PartialDrops,
+				r.BadMagic.Load(), r.StripErrs.Load(), r.DecodeErrs.Load(), asm.Complete, asm.Partial,
+				r.ResyncFrames.Load(), asm.Late, asm.Dups,
 				r.HeaderTooShort.Load(), r.HeaderBadStart.Load(), seqGaps, seqRewind)
 			return
 		}
@@ -128,12 +133,84 @@ func (r *Receiver) Run(ctx context.Context, track *webrtc.TrackRemote, lg *log.L
 			r.StripErrs.Add(1)
 			continue
 		}
-		complete, ok := asm.Add(pkt.Timestamp, stripped, pkt.Marker)
-		if !ok {
+		lateBefore := asm.Late
+		released = asm.Add(released[:0], pkt.SequenceNumber, pkt.Timestamp, curFlags&vp9FlagB != 0, pkt.Marker, stripped)
+		if asm.Late != lateBefore {
+			r.LatePackets.Add(1)
+		}
+		for _, f := range released {
+			if f.Complete {
+				r.walkFrames(ctx, f.Segments[0], lg)
+				continue
+			}
+			r.PartialFrames.Add(1)
+			for i, seg := range f.Segments {
+				if i == 0 && f.AtBegin {
+					r.walkFrames(ctx, seg, lg)
+				} else {
+					r.resyncFrames(ctx, seg)
+				}
+			}
+		}
+	}
+}
+
+// vp9FlagB is the begin-of-frame bit of the VP9 payload descriptor
+// (RFC 9628 §4.2: I|P|L|F|B|E|V|Z).
+const vp9FlagB = 0x08
+
+// resyncFrames salvages tunnel frames from a fragment that does not start on
+// a tunnel-frame boundary — the bytes after a packet that never arrived. It
+// scans for the next plausible header and walks from there. A false match
+// inside WireGuard ciphertext is ~2^-40 per byte and WireGuard rejects it
+// anyway; handshake frames are never accepted from a fragment, because a
+// stray HELLO tears the relay down.
+func (r *Receiver) resyncFrames(ctx context.Context, buf []byte) {
+	for i := 0; i+HeaderSize <= len(buf); {
+		if buf[i] != MagicByte0 || buf[i+1] != MagicByte1 || buf[i+2] != Version {
+			i++
 			continue
 		}
+		length := binary.BigEndian.Uint32(buf[i+8 : i+12])
+		total := HeaderSize + int(length)
+		if length > MaxPayloadSize || i+total > len(buf) {
+			i++
+			continue
+		}
+		decoded, err := DecodeFrame(buf[i : i+total])
+		if err != nil || decoded.Flags&(FlagHandshake|FlagHandshakeAck) != 0 {
+			i++
+			continue
+		}
+		r.ResyncFrames.Add(1)
+		if !r.deliver(ctx, decoded) {
+			return
+		}
+		i += total
+	}
+}
 
-		r.walkFrames(ctx, complete, lg)
+// deliver applies the side filter and hands one decoded frame to the
+// consumer. It reports false once ctx is done.
+func (r *Receiver) deliver(ctx context.Context, decoded DecodedFrame) bool {
+	// Side-filter: drop frames stamped with our own pool-side flag.
+	// Used by SFU pool members to avoid bot-to-bot loops when the SFU
+	// broadcasts each publisher's track to every other participant.
+	// Zero DropFlag (legacy default) makes this a no-op.
+	if r.DropFlag != 0 && decoded.Flags.Has(r.DropFlag) {
+		r.SideFiltered.Add(1)
+		return true
+	}
+
+	payload := make([]byte, len(decoded.Payload))
+	copy(payload, decoded.Payload)
+
+	r.FramesPushed.Add(1)
+	select {
+	case r.out <- ReceivedFrame{MsgID: decoded.MsgID, Flags: decoded.Flags, Payload: payload}:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -191,24 +268,7 @@ func (r *Receiver) walkFrames(ctx context.Context, buf []byte, lg *log.Logger) {
 			return
 		}
 
-		// Side-filter: drop frames stamped with our own pool-side flag.
-		// Used by SFU pool members to avoid bot-to-bot loops when the SFU
-		// broadcasts each publisher's track to every other participant.
-		// Zero DropFlag (legacy default) makes this a no-op.
-		if r.DropFlag != 0 && decoded.Flags.Has(r.DropFlag) {
-			r.SideFiltered.Add(1)
-			buf = buf[total:]
-			frameIdx++
-			continue
-		}
-
-		payload := make([]byte, len(decoded.Payload))
-		copy(payload, decoded.Payload)
-
-		r.FramesPushed.Add(1)
-		select {
-		case r.out <- ReceivedFrame{MsgID: decoded.MsgID, Flags: decoded.Flags, Payload: payload}:
-		case <-ctx.Done():
+		if !r.deliver(ctx, decoded) {
 			return
 		}
 

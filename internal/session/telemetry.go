@@ -1,4 +1,4 @@
-package telemost
+package session
 
 import (
 	"encoding/json"
@@ -20,7 +20,40 @@ const (
 	reportHeight = 720
 )
 
-// newPublisherStatsProvider returns a telemetry callback that mirrors what a
+// PublisherIdent names the publisher's own tracks the way the SFU sees them in
+// the publisherSdpOffer, so telemetry can be attributed to the right m-lines.
+type PublisherIdent struct {
+	VideoSSRC uint32
+	VideoMid  string
+	AudioMid  string
+}
+
+// Publisher returns the SSRC and mids of our published tracks. The mids must be
+// read from the live transceivers rather than assumed: SetupSession adds audio
+// before video, so pion assigns mid "0" to AUDIO and "1" to VIDEO, and swapping
+// them in telemetry would report a video encoder behind the audio m-line. Zero
+// values mean the local description has not been set yet.
+func (s *Session) Publisher() PublisherIdent {
+	var id PublisherIdent
+	for _, tr := range s.Pub.PC.GetTransceivers() {
+		snd := tr.Sender()
+		if snd == nil {
+			continue
+		}
+		switch snd.Track() {
+		case s.VideoTrack:
+			id.VideoMid = tr.Mid()
+			if p := snd.GetParameters(); len(p.Encodings) > 0 {
+				id.VideoSSRC = uint32(p.Encodings[0].SSRC)
+			}
+		case s.AudioTrack:
+			id.AudioMid = tr.Mid()
+		}
+	}
+	return id
+}
+
+// NewPublisherStatsProvider returns a telemetry callback that mirrors what a
 // real Telemost web client emits every ~20 s: a getStats() dump proving a live
 // encoder sits behind our published video track. It is driven by the Sender's
 // real wire counters (TxSamples → framesEncoded, TxBytes → bytesSent) so the
@@ -29,8 +62,9 @@ const (
 //
 // This is a SIGNALLING-layer message only; it never touches the fake-VP9 media
 // pipeline that carries the HELLO/HELLO_ACK handshake, so it cannot break
-// pairing. ssrc is the real RTP SSRC of the published video track (0 ⇒ omit).
-func newPublisherStatsProvider(sender *tunnel.Sender, ssrc uint32) func() *goloom.Telemetry {
+// pairing. id names our tracks as the SFU knows them (see Session.Publisher);
+// a zero VideoSSRC omits the ssrc field.
+func NewPublisherStatsProvider(sender *tunnel.Sender, id PublisherIdent) func() *goloom.Telemetry {
 	var (
 		mu         sync.Mutex
 		prevFrames uint64
@@ -51,7 +85,7 @@ func newPublisherStatsProvider(sender *tunnel.Sender, ssrc uint32) func() *goloo
 		mu.Unlock()
 
 		return &goloom.Telemetry{
-			PublisherRawStatsReport:  buildPublisherReport(now, frames, bytes, fps, ssrc),
+			PublisherRawStatsReport:  buildPublisherReport(now, frames, bytes, fps, id),
 			SubscriberRawStatsReport: []string{},
 			RoomAgentRawStatsReport:  []string{},
 			EventsReport:             []string{},
@@ -63,7 +97,7 @@ func newPublisherStatsProvider(sender *tunnel.Sender, ssrc uint32) func() *goloo
 // buildPublisherReport renders the getStats entries a live video publisher
 // produces, one JSON-encoded RTCStats object per []string element, matching the
 // browser-captured schema.
-func buildPublisherReport(now time.Time, frames, bytes uint64, fps float64, ssrc uint32) []string {
+func buildPublisherReport(now time.Time, frames, bytes uint64, fps float64, id PublisherIdent) []string {
 	tsMs := float64(now.UnixNano()) / 1e6
 
 	// Approximate packet-level counters from the byte counter: our batched
@@ -78,7 +112,7 @@ func buildPublisherReport(now time.Time, frames, bytes uint64, fps float64, ssrc
 		"id": "OTV0", "timestamp": tsMs, "type": "outbound-rtp",
 		"kind": "video", "mediaType": "video", "transportId": "T01",
 		"codecId": "COV0", "mediaSourceId": "SV0", "remoteId": "RIV0",
-		"mid": "0", "active": true, "encodingIndex": 0,
+		"mid": id.VideoMid, "active": true, "encodingIndex": 0,
 		"bytesSent": bytes, "packetsSent": packets, "headerBytesSent": headerBytes,
 		"framesEncoded": frames, "framesSent": frames, "keyFramesEncoded": keyFrames,
 		"hugeFramesSent": 0, "frameWidth": reportWidth, "frameHeight": reportHeight,
@@ -89,8 +123,8 @@ func buildPublisherReport(now time.Time, frames, bytes uint64, fps float64, ssrc
 		"totalEncodeTime": encodeTime, "totalEncodedBytesTarget": 0,
 		"totalPacketSendDelay": sendDelay,
 	}
-	if ssrc != 0 {
-		outVideo["ssrc"] = ssrc
+	if id.VideoSSRC != 0 {
+		outVideo["ssrc"] = id.VideoSSRC
 	}
 
 	entries := []map[string]any{
@@ -106,7 +140,7 @@ func buildPublisherReport(now time.Time, frames, bytes uint64, fps float64, ssrc
 		outVideo,
 		{
 			"id": "OTA0", "timestamp": tsMs, "type": "outbound-rtp", "kind": "audio",
-			"mediaType": "audio", "transportId": "T01", "mid": "1", "active": true,
+			"mediaType": "audio", "transportId": "T01", "mid": id.AudioMid, "active": true,
 			"bytesSent": bytes / 40, "packetsSent": frames, "headerBytesSent": frames * 12,
 		},
 		{

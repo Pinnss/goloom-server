@@ -1,4 +1,4 @@
-package telemost
+package session
 
 import (
 	"encoding/json"
@@ -11,10 +11,25 @@ import (
 func TestBuildPublisherReport(t *testing.T) {
 	now := time.Unix(1784709618, 110089000)
 	const frames, bytes, ssrc = uint64(2556), uint64(2965815), uint32(2138874305)
-	report := buildPublisherReport(now, frames, bytes, 25.0, ssrc)
+	// SetupSession adds audio before video, so pion gives audio mid "0" and
+	// video mid "1". The report must follow the transceivers, not the reverse.
+	id := PublisherIdent{VideoSSRC: ssrc, VideoMid: "1", AudioMid: "0"}
+	report := buildPublisherReport(now, frames, bytes, 25.0, id)
 
 	if len(report) == 0 {
 		t.Fatal("empty report")
+	}
+	// Each outbound-rtp entry must sit on ITS OWN m-line. Pinning video stats
+	// to the audio mid tells the SFU there is no encoder behind our video track.
+	for _, entry := range report {
+		var e struct{ Type, Kind, Mid string }
+		if err := json.Unmarshal([]byte(entry), &e); err != nil || e.Type != "outbound-rtp" {
+			continue
+		}
+		want := map[string]string{"video": id.VideoMid, "audio": id.AudioMid}[e.Kind]
+		if e.Mid != want {
+			t.Errorf("%s outbound-rtp on mid %q, want %q: %s", e.Kind, e.Mid, want, entry)
+		}
 	}
 
 	var outVideo map[string]any
@@ -59,7 +74,7 @@ func TestProviderEnvelopeShape(t *testing.T) {
 		Ev   []string `json:"eventsReport"`
 		Cust []string `json:"customStats"`
 	}{
-		Pub:  buildPublisherReport(time.Now(), 100, 200000, 25, 42),
+		Pub:  buildPublisherReport(time.Now(), 100, 200000, 25, PublisherIdent{VideoSSRC: 42, VideoMid: "1", AudioMid: "0"}),
 		Sub:  []string{},
 		Room: []string{},
 		Ev:   []string{},
