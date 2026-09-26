@@ -17,7 +17,10 @@ import (
 // onPLI is called (in the read goroutine) whenever a PLI or FIR arrives on
 // the video sender — caller should respond by pushing a fresh keyframe down
 // the same track ASAP so the SFU stops dropping our frames.
-func StartRTCPLoop(ctx context.Context, lg *log.Logger, tag string, pc *webrtc.PeerConnection, onPLI func()) {
+// onTWCC, when non-nil, is invoked for every TransportLayerCC feedback packet
+// with (delivered, lost) packet counts from that window — the closed-loop
+// signal a congestion controller consumes to pace the sender.
+func StartRTCPLoop(ctx context.Context, lg *log.Logger, tag string, pc *webrtc.PeerConnection, onPLI func(), onTWCC func(delivered, lost int)) {
 	for _, sender := range pc.GetSenders() {
 		s := sender
 		track := s.Track()
@@ -27,11 +30,11 @@ func StartRTCPLoop(ctx context.Context, lg *log.Logger, tag string, pc *webrtc.P
 			label = fmt.Sprintf("%s[%s]", tag, track.Kind())
 			isVideo = track.Kind() == webrtc.RTPCodecTypeVideo
 		}
-		go runRTCPSenderLoop(ctx, lg, label, s, isVideo, onPLI)
+		go runRTCPSenderLoop(ctx, lg, label, s, isVideo, onPLI, onTWCC)
 	}
 }
 
-func runRTCPSenderLoop(ctx context.Context, lg *log.Logger, label string, s *webrtc.RTPSender, isVideo bool, onPLI func()) {
+func runRTCPSenderLoop(ctx context.Context, lg *log.Logger, label string, s *webrtc.RTPSender, isVideo bool, onPLI func(), onTWCC func(delivered, lost int)) {
 	for {
 		if ctx.Err() != nil {
 			return
@@ -42,11 +45,20 @@ func runRTCPSenderLoop(ctx context.Context, lg *log.Logger, label string, s *web
 			return
 		}
 		logRTCPPackets(lg, label, pkts)
-		if isVideo && onPLI != nil {
-			for _, pkt := range pkts {
-				switch pkt.(type) {
-				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+		for _, pkt := range pkts {
+			switch p := pkt.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				if isVideo && onPLI != nil {
 					onPLI()
+				}
+			case *rtcp.TransportLayerCC:
+				if onTWCC != nil {
+					delivered := len(p.RecvDeltas)
+					lost := int(p.PacketStatusCount) - delivered
+					if lost < 0 {
+						lost = 0
+					}
+					onTWCC(delivered, lost)
 				}
 			}
 		}

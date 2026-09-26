@@ -26,7 +26,7 @@ import (
 //      real VP8 interframe to keep the SFU's track-active timers happy
 //      (without it the SFU eventually stops forwarding the slot).
 //
-// Tuning is informed by the call-gate measurements: pacing 500µs +
+// Tuning is informed by a sibling project measurements: pacing 500µs +
 // batching 6KB/2ms got their tunnel from 6 Mbit/s to ~50 Mbit/s
 // sustained, which appears to be Telemost's per-track bandwidth cap.
 type Sender struct {
@@ -126,6 +126,26 @@ type Sender struct {
 	TxBytes   atomic.Uint64
 	TxBatches atomic.Uint64
 	TxDrops   atomic.Uint64 // batches dropped on full queue (backpressure) — diagnostic
+
+	// rateLimitBps caps the average wire output to this many bits/sec (0 =
+	// unlimited). Driven by [RateController] off the SFU's TWCC feedback so we
+	// pace just under where loss appears. When incoming tunnel data exceeds the
+	// limit the excess drops LOCALLY at [Sender.shipLocked] (queue full) — with
+	// no RTP sequence assigned, so no wire gap and no SFU NACK. Accessed
+	// atomically; read once per sample in [Sender.sendLoop].
+	rateLimitBps atomic.Uint64
+
+	// WriteMu, when non-nil, serializes track.WriteSample across ALL goroutines
+	// that write the same video track (this Sender's data path plus the keyframe
+	// refresh / PLI-keyframe helpers). pion's TrackLocalStaticSample assigns
+	// seq/ts/pictureID under its own lock but RELEASES it before the per-packet
+	// WriteRTP loop, so concurrent writers interleave packets ON THE WIRE — a
+	// big data frame's packets get split by an injected keyframe packet, the SFU
+	// sheds the out-of-order tail (gappy forward while TWCC stays 0% loss), and
+	// with no RTX the gaps are never repaired → slot unbind. Holding one shared
+	// mutex around the whole WriteSample makes each frame flush completely before
+	// the next starts. Mutates zero wire bytes — only ordering. 2026-07-22.
+	WriteMu *sync.Mutex
 
 	// Logger, when non-nil, receives throttled backpressure-drop diagnostics.
 	// Optional / nil-safe. Set by the server telemost path (2026-06-25) to
@@ -405,14 +425,23 @@ func (s *Sender) sendLoop() {
 			return
 
 		case data := <-s.queue:
-			if pacing := jitteredPacing(); pacing > 0 {
-				if elapsed := time.Since(lastSend); elapsed < pacing {
-					time.Sleep(pacing - elapsed)
-				}
-			}
 			frameCount++
 			isKeyframe := s.KeyframePeriod > 0 && frameCount%uint64(s.KeyframePeriod) == 0
 			payload := s.wrapPayload(data, isKeyframe)
+			// Space this sample by the larger of the anti-fingerprint pacing
+			// jitter and the congestion-control rate gap (sized from this
+			// sample's bytes and the current TWCC-driven limit). Holding the
+			// average under the limit keeps the SFU from seeing loss; the
+			// excess it can't fit has already dropped locally at shipLocked.
+			gap := jitteredPacing()
+			if rg := s.rateGap(len(payload)); rg > gap {
+				gap = rg
+			}
+			if gap > 0 {
+				if elapsed := time.Since(lastSend); elapsed < gap {
+					time.Sleep(gap - elapsed)
+				}
+			}
 			_ = s.writeSample(payload)
 			lastSend = time.Now()
 			lastDataSend = lastSend
@@ -482,9 +511,39 @@ func (s *Sender) wrapPayload(data []byte, isKeyframe bool) []byte {
 	if len(prefix) == 0 {
 		return data
 	}
-	out := make([]byte, len(prefix)+len(data))
-	copy(out, prefix)
-	copy(out[len(prefix):], data)
+	return superframeHide(prefix, data)
+}
+
+// superframeHide packs a real, decodable VP9 frame followed by opaque tunnel
+// data into a single VP9 SUPERFRAME whose trailing index declares EXACTLY ONE
+// frame of size len(realFrame). A VP9 decoder reads the index from the end,
+// decodes only the real frame at the front, and never touches the bytes between
+// it and the index — so `data` (WireGuard datagrams) rides completely hidden
+// while framesDecoded still increments on every sample. This is what removes
+// the SFU's "undecodable stream" cutoff: without the index, the trailing data
+// corrupts the frame and libvpx rejects it ("Corrupt frame detected").
+//
+// Layout: realFrame ++ data ++ [marker, size(LE, `mag` bytes), marker].
+// The superframe marker (VP9 bitstream superframe index) is
+// 0b110·(mag-1)·(frames-1); frames=1 so the low 3 bits are 0. `mag` is the byte
+// width of the declared size — 1 for our 36/19-byte frames (always <256).
+// Verified against libvpx-vp9 (the browser decoder): 1 frame decoded, 0 errors,
+// hidden data ignored, across single frames and multi-GOP sequences.
+func superframeHide(realFrame, data []byte) []byte {
+	n := len(realFrame)
+	mag := 1
+	for n>>(8*mag) > 0 {
+		mag++
+	}
+	out := make([]byte, 0, len(realFrame)+len(data)+2+mag)
+	out = append(out, realFrame...)
+	out = append(out, data...)
+	marker := byte(0xC0 | ((mag - 1) << 3)) // frames-1 == 0
+	out = append(out, marker)
+	for i := 0; i < mag; i++ {
+		out = append(out, byte(n>>(8*i)))
+	}
+	out = append(out, marker)
 	return out
 }
 
@@ -521,10 +580,15 @@ func (s *Sender) computeSampleDuration() time.Duration {
 }
 
 func (s *Sender) writeSample(payload []byte) error {
-	if err := s.track.WriteSample(media.Sample{
-		Data:     payload,
-		Duration: s.computeSampleDuration(),
-	}); err != nil {
+	dur := s.computeSampleDuration()
+	if s.WriteMu != nil {
+		s.WriteMu.Lock()
+	}
+	err := s.track.WriteSample(media.Sample{Data: payload, Duration: dur})
+	if s.WriteMu != nil {
+		s.WriteMu.Unlock()
+	}
+	if err != nil {
 		return err
 	}
 	s.TxSamples.Add(1)
@@ -533,10 +597,15 @@ func (s *Sender) writeSample(payload []byte) error {
 }
 
 func (s *Sender) writeSampleRaw(payload []byte) error {
-	if err := s.track.WriteSample(media.Sample{
-		Data:     payload,
-		Duration: s.computeSampleDuration(),
-	}); err != nil {
+	dur := s.computeSampleDuration()
+	if s.WriteMu != nil {
+		s.WriteMu.Lock()
+	}
+	err := s.track.WriteSample(media.Sample{Data: payload, Duration: dur})
+	if s.WriteMu != nil {
+		s.WriteMu.Unlock()
+	}
+	if err != nil {
 		return err
 	}
 	s.TxSamples.Add(1)
@@ -544,3 +613,23 @@ func (s *Sender) writeSampleRaw(payload []byte) error {
 }
 
 func (s *Sender) PeekNextID() uint32 { return s.nextMsgID.Load() + 1 }
+
+// SetRateLimit sets the average wire output cap in bits/sec (0 = unlimited).
+// Called by the congestion controller as its TWCC estimate moves. Safe for
+// concurrent use.
+func (s *Sender) SetRateLimit(bps uint64) { s.rateLimitBps.Store(bps) }
+
+// RateLimit returns the current cap in bits/sec (0 = unlimited).
+func (s *Sender) RateLimit() uint64 { return s.rateLimitBps.Load() }
+
+// rateGap returns how long a sample of sampleBytes must be spaced from the
+// previous one to hold the average output at the current rate limit. Zero when
+// unlimited. Called only from the sendLoop goroutine.
+func (s *Sender) rateGap(sampleBytes int) time.Duration {
+	lim := s.rateLimitBps.Load()
+	if lim == 0 || sampleBytes <= 0 {
+		return 0
+	}
+	// seconds = bits / bitsPerSec = (bytes*8) / lim
+	return time.Duration(float64(sampleBytes) * 8 / float64(lim) * float64(time.Second))
+}

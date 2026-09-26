@@ -104,8 +104,15 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 		}
 	}()
 
+	// One shared mutex serializes EVERY writer of sess.VideoTrack — the tunnel
+	// Sender, RunKeyframeRefresh, and the PLI keyframe pusher — so their packets
+	// never interleave on the wire (pion releases its per-sample lock before the
+	// WriteRTP loop; concurrent writers otherwise corrupt on-wire ordering and
+	// the SFU sheds our out-of-order packets). 2026-07-22.
+	videoWriteMu := &sync.Mutex{}
+
 	go session.RunOpusSilenceLoop(ctx, lg, sess.AudioTrack)
-	go session.RunKeyframeRefresh(ctx, lg, sess.VideoTrack)
+	go session.RunKeyframeRefresh(ctx, lg, sess.VideoTrack, videoWriteMu)
 	if err := session.SendInitialKeyframes(lg, sess.VideoTrack, 10); err != nil {
 		return nil, fmt.Errorf("telemost: keyframe warmup: %w", err)
 	}
@@ -126,7 +133,23 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	cameraSender.InterframePrefix = mediastubs.VP9InterframeHeader
 	cameraSender.SideFlag = sendSideFlag
 	cameraSender.Logger = lg // backpressure-drop diagnostics (2026-06-25)
+	cameraSender.WriteMu = videoWriteMu
 	cameraSender.Start()
+
+	// Report a live-encoder getStats() every telemetry tick instead of the
+	// empty stub. The SFU demotes a publisher whose telemetry never shows a
+	// real encoder (~1-2 min), stopping video forwarding — measured 2026-07-22.
+	// Signalling-only; does not touch the handshake-carrying media path.
+	var videoSSRC uint32
+	for _, snd := range sess.Pub.PC.GetSenders() {
+		if snd.Track() == sess.VideoTrack {
+			if p := snd.GetParameters(); len(p.Encodings) > 0 {
+				videoSSRC = uint32(p.Encodings[0].SSRC)
+			}
+			break
+		}
+	}
+	sess.Client.SetTelemetryProvider(newPublisherStatsProvider(cameraSender, videoSSRC))
 
 	peerID, err := session.Handshake(ctx, lg, sess, cameraSender, merged, 1)
 	if err != nil {
@@ -135,19 +158,72 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	}
 	lg.Printf("telemost: handshake ✓ peer=%s", peerID)
 
-	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, lg, 100*time.Millisecond)
-	session.StartRTCPLoop(ctx, lg, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI)
+	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, lg, 100*time.Millisecond, videoWriteMu)
 
-	// Periodic slot rebinds — copied from the original runner.go: SFU
-	// sometimes drops our subscription, this nudges it back. Independent
-	// of session lifetime; the goroutine watches ctx.
+	// Closed-loop congestion control: pace the tunnel sender to the SFU's TWCC
+	// feedback so we never overshoot the path and induce the NACK storm that
+	// makes the SFU unbind our video slot (mid=) after ~10-120 s. Excess tunnel
+	// data drops locally in the sender queue (no wire gap, no NACK). Start
+	// paced at 3 Mbps; the controller ramps up while loss stays near zero and
+	// backs off the moment it climbs. 2026-07-22 — added after the NACK-storm
+	// root cause was confirmed on the bench stand.
+	// Cap the send rate LOW. Our CC only sees the server→SFU leg (clean, ramps
+	// to 40 Mbps), but the real bottleneck is the SFU→phone MOBILE leg (~1-2
+	// Mbps). Flooding 40 Mbps into a ~1.5 Mbps mobile forward leg makes the SFU
+	// shred ~95% of our (non-adaptive) stream → the phone gets a trickle, and the
+	// overshoot loss also triggers the SFU's ~60s forwarding cutoff. Capping at a
+	// plausible-mobile rate lets the SFU forward the whole stream cleanly; excess
+	// WG data drops locally and inner TCP-over-WG adapts. 2026-07-23 — raise once
+	// confirmed traffic flows; a working 1.5 Mbps beats a shredded 40 Mbps.
+	rateCtl := tunnel.NewRateController(1_200_000)
+	rateCtl.MaxBps = 1_500_000
+	cameraSender.SetRateLimit(uint64(rateCtl.Target()))
+	onTWCC := func(delivered, lost int) {
+		cameraSender.SetRateLimit(uint64(rateCtl.Observe(delivered, lost)))
+	}
 	go func() {
-		for i, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				lg.Printf("CC target=%.2f Mbps lossEMA=%.2f%% txDrops=%d",
+					rateCtl.Target()/1e6, rateCtl.LossEMA()*100, cameraSender.TxDrops.Load())
+			}
+		}
+	}()
+	session.StartRTCPLoop(ctx, lg, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, onTWCC)
+
+	// Slot-subscription keepalive. The SFU expires our subscription to the
+	// peer's video ~45s after the LAST setSlots and stops forwarding it — the
+	// downstream WG payload then freezes and the rx-stall watchdog re-pairs
+	// (measured 2026-07-23: last setSlots at +15s → peer media stops at +60s →
+	// inner WG handshake fails). So after the initial fast rebinds we must KEEP
+	// re-sending setSlots forever to renew the lease. RebindSlots just re-sends
+	// the setSlots message on the existing session (no re-join / no room churn).
+	// The key must keep climbing so the SFU treats each as the newest layout.
+	go func() {
+		key := 4
+		for _, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(delay):
-				_ = sess.RebindSlots(ctx, 4+i)
+				_ = sess.RebindSlots(ctx, key)
+				key++
+			}
+		}
+		t := time.NewTicker(25 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = sess.RebindSlots(ctx, key)
+				key++
 			}
 		}
 	}()

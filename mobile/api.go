@@ -342,8 +342,12 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 		}
 	}
 
+	// Shared mutex serializes all writers of sess.VideoTrack (Sender + keyframe
+	// refresh + PLI pusher) so their RTP packets don't interleave on the wire.
+	videoWriteMu := &sync.Mutex{}
+
 	go session.RunOpusSilenceLoop(ctx, c.logger, sess.AudioTrack)
-	go session.RunKeyframeRefresh(ctx, c.logger, sess.VideoTrack)
+	go session.RunKeyframeRefresh(ctx, c.logger, sess.VideoTrack, videoWriteMu)
 	if err := session.SendInitialKeyframes(c.logger, sess.VideoTrack, 10); err != nil {
 		cancel()
 		sess.Close()
@@ -364,6 +368,7 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	cameraSender.VP8Wrap = true
 	cameraSender.VP8Prefix = mediastubs.VP9BlackKeyframe
 	cameraSender.InterframePrefix = mediastubs.VP9InterframeHeader
+	cameraSender.WriteMu = videoWriteMu
 	cameraSender.Start()
 
 	c.emitPhase("handshake", "exchanging HELLO with peer")
@@ -375,16 +380,35 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 		return ConnectResult{}, fmt.Errorf("handshake: %w", err)
 	}
 
-	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, c.logger, 100*time.Millisecond)
-	session.StartRTCPLoop(ctx, c.logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI)
+	pushKeyframeOnPLI := session.MakeKeyframePusher(sess.VideoTrack, c.logger, 100*time.Millisecond, videoWriteMu)
+	// onTWCC=nil: the phone→server direction already forwards fine; congestion
+	// control is wired on the server publisher path (see internal/sfu/telemost).
+	session.StartRTCPLoop(ctx, c.logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, nil)
 
+	// Slot-subscription keepalive — see internal/sfu/telemost/transport.go for
+	// the full rationale. The SFU expires our subscription to the server's video
+	// ~45s after the last setSlots (measured 2026-07-23) and stops forwarding it,
+	// which freezes the WG payload and forces a re-pair. Renew every 25s forever.
 	go func() {
-		for i, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
+		key := 4
+		for _, delay := range []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second} {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(delay):
-				sess.RebindSlots(ctx, 4+i)
+				sess.RebindSlots(ctx, key)
+				key++
+			}
+		}
+		t := time.NewTicker(25 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sess.RebindSlots(ctx, key)
+				key++
 			}
 		}
 	}()

@@ -209,12 +209,15 @@ func (t *DataTunnel) WasRxStalled() bool {
 // Windows clients.
 var (
 	// DefaultRxStallTick — как часто опрашиваем rx-counter.
-	DefaultRxStallTick = 30 * time.Second
+	DefaultRxStallTick = 8 * time.Second
 	// DefaultRxStallTimeout — сколько rx может стоять до forced reconnect.
-	// 2 минуты выбраны под WG persistent-keepalive (25 сек) с запасом
-	// на несколько потерянных пакетов. Меньше — false-positive'ы при
-	// natural idle; больше — слишком долго жить с мёртвой сессией.
-	DefaultRxStallTimeout = 2 * time.Minute
+	// 2026-07-23: снижено 2min→35s. Telemost SFU перестаёт форвардить видео
+	// сервера на телефон примерно через ~60с после пары (причина ещё не
+	// устранена), rx замирает — старые 2 минуты означали «минуту работает,
+	// две мёртво». 35с безопасно выше WG persistent-keepalive (25с), так что
+	// живой-но-тихий туннель не даёт false-positive, но обрыв форвардинга
+	// восстанавливается быстрым ре-пейром за ~35с вместо 2 минут.
+	DefaultRxStallTimeout = 35 * time.Second
 )
 
 // RunRxStallWatchdog следит за свежестью rx-трафика на DataTunnel и

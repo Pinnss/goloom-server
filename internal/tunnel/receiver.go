@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"sync/atomic"
 
 	"github.com/pion/webrtc/v4"
+
+	mediastubs "github.com/Pinnss/goloom-server/internal/media"
 )
 
 type ReceivedFrame struct {
@@ -47,19 +50,76 @@ func (r *Receiver) Run(ctx context.Context, track *webrtc.TrackRemote, lg *log.L
 	defer close(r.out)
 	var asm FrameAssembler
 
+	// Media RTP sequence-gap tracking (2026-07-22). The SFU NACKs our publisher
+	// even when TWCC reports 0% transport loss — meaning it sees gaps in the
+	// MEDIA sequence space while every transport packet arrives. This measures,
+	// on the FORWARDED stream a subscriber actually receives, whether the media
+	// sequence numbers are contiguous. seq is uint16 so wraps are handled by the
+	// uint16 delta.
+	var (
+		haveSeq   bool
+		expectSeq uint16
+		seqGaps   uint64
+		seqRewind uint64
+		prevFlags byte // VP9 descriptor flag byte of the previous packet
+		prevMark  bool // marker bit of the previous packet
+	)
+	// descBits renders the VP9 descriptor flag byte (RFC 8741 §4.2):
+	// I|P|L|F|B|E|V|Z — B=start-of-frame, E=end-of-frame, V=SS present.
+	descBits := func(f byte) string {
+		b := func(mask byte) int {
+			if f&mask != 0 {
+				return 1
+			}
+			return 0
+		}
+		return fmt.Sprintf("I%dP%dL%dF%dB%dE%dV%dZ%d",
+			b(0x80), b(0x40), b(0x20), b(0x10), b(0x08), b(0x04), b(0x02), b(0x01))
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
-			lg.Printf("receiver track %s read end: %v (rtp_pkts=%d frames=%d bad_magic=%d strip_errs=%d decode_errs=%d partial_drops=%d hdr_short=%d hdr_bad=%d)",
+			lg.Printf("receiver track %s read end: %v (rtp_pkts=%d frames=%d bad_magic=%d strip_errs=%d decode_errs=%d partial_drops=%d hdr_short=%d hdr_bad=%d seq_gaps=%d seq_rewind=%d)",
 				track.ID(), err, r.RTPPackets.Load(), r.FramesPushed.Load(),
 				r.BadMagic.Load(), r.StripErrs.Load(), r.DecodeErrs.Load(), asm.PartialDrops,
-				r.HeaderTooShort.Load(), r.HeaderBadStart.Load())
+				r.HeaderTooShort.Load(), r.HeaderBadStart.Load(), seqGaps, seqRewind)
 			return
 		}
 		r.RTPPackets.Add(1)
+
+		// Contiguity check on the media sequence number. delta is uint16:
+		// 0 = contiguous, [1,0x8000) = forward gap (missing packets),
+		// [0x8000,0xffff] = backward (reorder/duplicate/late).
+		var curFlags byte
+		if len(pkt.Payload) > 0 {
+			curFlags = pkt.Payload[0]
+		}
+		if haveSeq {
+			delta := pkt.SequenceNumber - expectSeq
+			switch {
+			case delta == 0:
+				// contiguous — expected
+			case delta < 0x8000:
+				seqGaps += uint64(delta)
+				// Log the descriptor of the packet BEFORE the gap and the one
+				// AFTER, to see whether the dropped packets cluster on a frame
+				// boundary / layer pattern (SFU layer-shedding) vs random.
+				lg.Printf("receiver %s SEQ GAP: expected=%d got=%d missing=%d total=%d | before[%s mark=%v] after[%s mark=%v]",
+					track.ID(), expectSeq, pkt.SequenceNumber, delta, seqGaps,
+					descBits(prevFlags), prevMark, descBits(curFlags), pkt.Marker)
+			default:
+				seqRewind++
+			}
+		}
+		if !haveSeq || pkt.SequenceNumber-expectSeq < 0x8000 {
+			expectSeq = pkt.SequenceNumber + 1
+			haveSeq = true
+		}
+		prevFlags, prevMark = curFlags, pkt.Marker
 
 		// VP9 migration 2026-05-27: tunnel now publishes as VP9 to dodge
 		// Telemost shaping. Old VP8 path retained in vp8.go for fallback.
@@ -81,18 +141,22 @@ func (r *Receiver) Run(ctx context.Context, track *webrtc.TrackRemote, lg *log.L
 // A sample may contain a codec keyframe/interframe prefix followed by one
 // or more concatenated tunnel frames (Sender batching).
 func (r *Receiver) walkFrames(ctx context.Context, buf []byte, lg *log.Logger) {
-	// Strip VP9 keyframe prefix if present (uncompressed header starting
-	// with 0x82 frame_marker byte followed by sync code 0x49 0x83 0x42).
-	// 9 bytes matches [internal/media.VP9BlackKeyframe].
-	if len(buf) > 9 && buf[0] == 0x82 && buf[1] == 0x49 && buf[2] == 0x83 && buf[3] == 0x42 {
-		buf = buf[9:]
-	} else if len(buf) > 1 && buf[0] == 0x86 {
-		// Strip VP9 interframe prefix (single byte 0x86 — frame_marker=2,
-		// profile=0, show_existing=0, NonKeyFrame=1, ShowFrame=1, error_
-		// resilient=0). Matches [internal/media.VP9InterframeHeader]. Used
-		// by sender.go::wrapPayload for ~98% of frames after 2026-05-28
-		// keyframe-ratio fix.
-		buf = buf[1:]
+	// Strip the real, decodable VP9 frame that leads every tunnel sample.
+	// The keyframe is len(VP9BlackKeyframe)=36 bytes (0x82 0x49 0x83 0x42 …);
+	// the inter-frame is len(VP9InterframeHeader)=19 bytes (0x86 0x00 0x40
+	// 0x92 …). Lengths are read from the media vars so the receiver can never
+	// drift from the sender's prefixes (both derive from the same source).
+	// What follows is the concatenated tunnel frames, then a 3-byte VP9
+	// superframe index (see tunnel.superframeHide); that index is shorter than
+	// HeaderSize, so the walk loop below stops before it and leaves it
+	// untouched. (2026-07-23: was 9/1-byte header stubs — see the media pkg
+	// for why real frames were needed.)
+	kfLen := len(mediastubs.VP9BlackKeyframe)
+	ifLen := len(mediastubs.VP9InterframeHeader)
+	if len(buf) >= kfLen && buf[0] == 0x82 && buf[1] == 0x49 && buf[2] == 0x83 && buf[3] == 0x42 {
+		buf = buf[kfLen:]
+	} else if len(buf) >= ifLen && buf[0] == 0x86 && buf[1] == 0x00 && buf[2] == 0x40 && buf[3] == 0x92 {
+		buf = buf[ifLen:]
 	}
 	// Legacy VP8 fallback: strip VP8 keyframe prefix if present (frame_tag
 	// + start code 9d 01 2a). Pre-VP9 captures may still arrive briefly

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +15,17 @@ import (
 	mediastubs "github.com/Pinnss/goloom-server/internal/media"
 	"github.com/Pinnss/goloom-server/internal/tunnel"
 )
+
+// lockedWriteSample serializes one WriteSample under the shared video-track
+// mutex (nil = no locking). See [tunnel.Sender.WriteMu] for why concurrent
+// writers to one TrackLocalStaticSample corrupt on-wire packet ordering.
+func lockedWriteSample(mu *sync.Mutex, track *webrtc.TrackLocalStaticSample, s media.Sample) error {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	return track.WriteSample(s)
+}
 
 // InjectBandwidthAttribute scans an SDP string and inserts a bandwidth
 // declaration line ("b=AS:<kbps>") immediately after every matching
@@ -194,7 +206,7 @@ func RunKeyframeRefreshFast(ctx context.Context, lg *log.Logger, track *webrtc.T
 	}
 }
 
-func RunKeyframeRefresh(ctx context.Context, lg *log.Logger, track *webrtc.TrackLocalStaticSample) {
+func RunKeyframeRefresh(ctx context.Context, lg *log.Logger, track *webrtc.TrackLocalStaticSample, writeMu *sync.Mutex) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for {
@@ -202,7 +214,7 @@ func RunKeyframeRefresh(ctx context.Context, lg *log.Logger, track *webrtc.Track
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := track.WriteSample(media.Sample{
+			if err := lockedWriteSample(writeMu, track, media.Sample{
 				Data:     mediastubs.VP9BlackKeyframe,
 				Duration: 33 * time.Millisecond,
 			}); err != nil {
@@ -213,7 +225,7 @@ func RunKeyframeRefresh(ctx context.Context, lg *log.Logger, track *webrtc.Track
 	}
 }
 
-func MakeKeyframePusher(track *webrtc.TrackLocalStaticSample, lg *log.Logger, cooldown time.Duration) func() {
+func MakeKeyframePusher(track *webrtc.TrackLocalStaticSample, lg *log.Logger, cooldown time.Duration, writeMu *sync.Mutex) func() {
 	var lastSent atomic.Int64
 	var sent atomic.Uint64
 	return func() {
@@ -225,7 +237,7 @@ func MakeKeyframePusher(track *webrtc.TrackLocalStaticSample, lg *log.Logger, co
 		if !lastSent.CompareAndSwap(prev, now) {
 			return
 		}
-		if err := track.WriteSample(media.Sample{
+		if err := lockedWriteSample(writeMu, track, media.Sample{
 			Data:     mediastubs.VP9BlackKeyframe,
 			Duration: 33 * time.Millisecond,
 		}); err != nil {

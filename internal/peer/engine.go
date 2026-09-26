@@ -70,6 +70,22 @@ func BuildAPI() (*webrtc.API, error) {
 		return nil, err
 	}
 
+	// 2026-07-23 — TRIED a receiver-side transport-cc FEEDBACK generator here
+	// (twcc.NewSenderInterceptor) to fix the "barely loads" throughput on
+	// server→phone. It PASSED the clean-path bench-stand canary but REGRESSED the
+	// real MOBILE path: with the phone now reporting its (lossy mobile) receive
+	// stats, the SFU's send-side BWE for SFU→phone throttled DOWN toward zero, so
+	// even the tiny in-band HELLO stopped arriving and pairing failed
+	// (gotHello=false). Reverted. Receiver-side BWE feedback is the WRONG lever
+	// on a lossy last mile — it tells the SFU to send LESS, not more.
+
+	// 2026-07-22 — TRIED webrtc.ConfigureRTCPReports(ir) here (synthesize RTCP
+	// Sender Reports, which a real libwebrtc publisher sends ~1/s and we never
+	// did). It made things WORSE on the stand: delivery collapsed to ~1% and the
+	// handshake slowed to ~5.7s — pion's report interceptor evidently chokes on
+	// our very high packet rate. Reverted. RTCP-SR is not the fix (and not
+	// installable cheaply here).
+
 	return webrtc.NewAPI(
 		webrtc.WithMediaEngine(me),
 		webrtc.WithInterceptorRegistry(ir),

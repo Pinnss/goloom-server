@@ -54,6 +54,22 @@ type Client struct {
 	telemetryTicker *time.Ticker
 	tickersDone     chan struct{}
 	ackTimeout      time.Duration
+
+	// telemetryProvider, if set, supplies the telemetry payload for each
+	// tick — the live publisher getStats a real client would send. Set
+	// after the media sender exists (see SetTelemetryProvider); until then
+	// the periodic loop falls back to an empty stub. Guarded by mu because
+	// it is written from the transport goroutine and read from periodicLoop.
+	telemetryProvider func() *Telemetry
+}
+
+// SetTelemetryProvider installs the callback that builds each telemetry frame.
+// Passing nil restores the empty-stub behaviour. Safe to call concurrently with
+// the running periodic loop.
+func (c *Client) SetTelemetryProvider(fn func() *Telemetry) {
+	c.mu.Lock()
+	c.telemetryProvider = fn
+	c.mu.Unlock()
 }
 
 // NewClient wraps an already-open WebSocket. UA/Origin headers must be set on
@@ -142,7 +158,16 @@ func (c *Client) periodicLoop(ctx context.Context) {
 				return
 			}
 		case <-c.telemetryTicker.C:
-			if err := c.Send(Envelope{Telemetry: &Telemetry{PublisherRawStatsReport: []string{"{}"}}}); err != nil {
+			c.mu.Lock()
+			fn := c.telemetryProvider
+			c.mu.Unlock()
+			tel := &Telemetry{PublisherRawStatsReport: []string{"{}"}}
+			if fn != nil {
+				if p := fn(); p != nil {
+					tel = p
+				}
+			}
+			if err := c.Send(Envelope{Telemetry: tel}); err != nil {
 				c.log.Printf("telemetry send err: %v", err)
 				return
 			}
@@ -325,7 +350,36 @@ func (c *Client) logSend(env Envelope, raw []byte) {
 	c.log.Printf("→ %s (uid=%s, %d bytes)", t, shortUID(env.UID), len(raw))
 }
 
+// quietBodyTypes are inbound messages we either parse and log in detail
+// elsewhere (SDP, slotsConfig) or that are high-volume noise (ack/ping).
+// Everything else gets its raw JSON dumped — see logRecv.
+var quietBodyTypes = map[string]bool{
+	"ack":                 true,
+	"ping":                true,
+	"webrtcIceCandidate":  true,
+	"publisherSdpOffer":   true,
+	"publisherSdpAnswer":  true,
+	"subscriberSdpOffer":  true,
+	"subscriberSdpAnswer": true,
+	"slotsConfig":         true,
+	"telemetry":           true,
+}
+
+// maxRecvBodyDump caps the raw-JSON dump so an unexpectedly large message
+// can't flood the journal.
+const maxRecvBodyDump = 2000
+
+// logRecv dumps the raw body of every low-volume inbound message we don't
+// already decode. The SFU sends `selfQualityReport` every ~10-30s — that is its
+// own verdict on the media we publish — plus `slotsMeta` and any message type
+// we never modelled at all. We used to log only the byte count, which threw
+// that away. 2026-07-21 — added while diagnosing why the SFU stops forwarding
+// our published video.
 func (c *Client) logRecv(uid, typeName string, raw []byte) {
+	if !quietBodyTypes[typeName] && len(raw) <= maxRecvBodyDump {
+		c.log.Printf("← %s (uid=%s, %d bytes) body=%s", typeName, shortUID(uid), len(raw), string(raw))
+		return
+	}
 	c.log.Printf("← %s (uid=%s, %d bytes)", typeName, shortUID(uid), len(raw))
 }
 

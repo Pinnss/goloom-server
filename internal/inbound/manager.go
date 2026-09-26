@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Pinnss/goloom-server/pkg/vkauth"
@@ -50,6 +51,15 @@ type entry struct {
 	runner *Runner
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// rxStalled is set by [Manager.watchdog] when it force-cancels a session
+	// that HAD been relaying but went silent for the stall timeout. supervise
+	// reads it to fast-retry (like a peer re-handshake) instead of growing the
+	// backoff: a working tunnel that hiccups must rejoin the room in ~1s, or it
+	// falls out of phase with the peer — the peer's own 2-min handshake timeout
+	// expires during our grown backoff and the two ends chase each other,
+	// re-pairing on divergent schedules forever (measured 2026-07-22).
+	rxStalled atomic.Bool
 }
 
 func NewManager(lg *log.Logger) *Manager {
@@ -268,6 +278,8 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 
 	backoff := 5 * time.Second
 	for {
+		e.rxStalled.Store(false)
+
 		// Каждая попытка получает свой derived ctx — так watchdog может
 		// прибить конкретно этот Run без того, чтобы убить весь supervise.
 		runCtx, runCancel := context.WithCancel(ctx)
@@ -277,7 +289,7 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 		// явно сдохла (ICE failed, peer disconnected, etc.) даже если
 		// внутренний runner этого ещё не заметил. Cancel'ом forсим выход
 		// из creator.Run и попадаем во второй виток retry-цикла.
-		go m.watchdog(runCtx, runCancel, e.runner)
+		go m.watchdog(runCtx, runCancel, e)
 
 		err := e.runner.Run(runCtx)
 		runCancel()
@@ -290,12 +302,22 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 		// remote side is already up and waiting; backing off would just
 		// stretch the user-visible outage. Reset backoff so a successful
 		// reconnect followed by a real failure later starts fresh.
+		//
+		// A watchdog-forced rx-stall (rxStalled) is treated the SAME way: the
+		// tunnel WAS relaying and just went quiet, so the peer is up (or about
+		// to re-pair). Growing the backoff here is what previously desynced the
+		// two ends — the server sat in a 40-80s backoff while the phone's 2-min
+		// handshake timeout expired, so they never met (measured 2026-07-22).
 		retryAfter := backoff
-		if errors.Is(err, wgrelay.ErrPeerRehandshake) {
+		if errors.Is(err, wgrelay.ErrPeerRehandshake) || e.rxStalled.Load() {
 			// 1s pause lets the SFU process WS-bye + DTLS close from
 			// the old session before we rejoin. Skipping it leaves a
 			// zombie participant for the ~30s ICE timeout.
-			m.logger.Printf("inbound %s: peer rehandshake — reconnecting in 1s", e.runner.Spec.Tag)
+			reason := "peer rehandshake"
+			if e.rxStalled.Load() {
+				reason = "rx-stall (was relaying)"
+			}
+			m.logger.Printf("inbound %s: %s — reconnecting in 1s", e.runner.Spec.Tag, reason)
 			retryAfter = 1 * time.Second
 			backoff = 5 * time.Second
 		} else if err != nil && isLikelyEmptyRoom(err) {
@@ -314,7 +336,7 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 			return
 		case <-time.After(retryAfter):
 		}
-		if !errors.Is(err, wgrelay.ErrPeerRehandshake) && backoff < 60*time.Second {
+		if !errors.Is(err, wgrelay.ErrPeerRehandshake) && !e.rxStalled.Load() && backoff < 60*time.Second {
 			backoff *= 2
 		}
 	}
@@ -341,14 +363,17 @@ func (m *Manager) supervise(ctx context.Context, e *entry) {
 // ни одного нового accept'а И прямо сейчас ноль активных коннектов,
 // считаем listener'а потенциально зависшим и кикаем его. Иначе —
 // идём по обычной Bridge-логике.
-func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Runner) {
+func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, e *entry) {
+	r := e.runner
 	if isRelayTransport(r.Spec.Transport) {
 		m.watchdogRelay(ctx, cancel, r)
 		return
 	}
 	const (
-		tick           = 30 * time.Second
-		rxStallTimeout = 2 * time.Minute
+		// 2026-07-23: 2min→35s (see wgrelay.DefaultRxStallTimeout) so a stalled
+		// forward leg re-pairs in ~35s not 2min. Above WG keepalive (25s).
+		tick           = 8 * time.Second
+		rxStallTimeout = 35 * time.Second
 	)
 	t := time.NewTicker(tick)
 	defer t.Stop()
@@ -385,8 +410,9 @@ func (m *Manager) watchdog(ctx context.Context, cancel context.CancelFunc, r *Ru
 				continue
 			}
 			if time.Since(lastChange) > rxStallTimeout {
-				m.logger.Printf("inbound %s: no rx for %s while phase=relaying — forcing reconnect",
+				m.logger.Printf("inbound %s: no rx for %s while phase=relaying — forcing reconnect (fast-retry)",
 					r.Spec.Tag, rxStallTimeout)
+				e.rxStalled.Store(true)
 				cancel()
 				return
 			}

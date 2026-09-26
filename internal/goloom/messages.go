@@ -206,11 +206,20 @@ type SdkCodecsInfo struct {
 	Codecs []json.RawMessage `json:"codecs"`
 }
 
-// Telemetry carries periodic stats reports. We send a minimal stub every
-// telemetryConfiguration.sendingInterval to keep the SFU's liveness counter
-// happy.
+// Telemetry carries periodic stats reports, emitted every
+// telemetryConfiguration.sendingInterval. The real web client sends a full
+// getStats() dump here — an array of one JSON-encoded RTCStats object per
+// element across all five report buckets. The SFU reads publisherRawStatsReport
+// to decide whether a live encoder sits behind our published track; an empty
+// report is a strong "no real media" signal that makes it stop forwarding us
+// after ~1-2 min. All five keys are present (empty as []) to mirror the real
+// envelope shape captured from the browser 2026-07-22.
 type Telemetry struct {
-	PublisherRawStatsReport []string `json:"publisherRawStatsReport"`
+	PublisherRawStatsReport  []string `json:"publisherRawStatsReport"`
+	SubscriberRawStatsReport []string `json:"subscriberRawStatsReport"`
+	RoomAgentRawStatsReport  []string `json:"roomAgentRawStatsReport"`
+	EventsReport             []string `json:"eventsReport"`
+	CustomStats              []string `json:"customStats"`
 }
 
 // Ping carries no payload but the wrapper exists for type safety.
