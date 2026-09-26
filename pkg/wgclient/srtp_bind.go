@@ -46,7 +46,17 @@ type SRTPBind struct {
 	open   bool
 	closed chan struct{}
 
-	conns []net.Conn // owned — Close() closes all
+	// One slot per TURN allocation, read atomically: a slot's conn can be
+	// swapped out by the watchdog while Send is running. Owned — Close()
+	// closes whatever each slot currently holds.
+	slots []atomic.Pointer[connBox]
+
+	// Redial, when set, re-establishes the transport for one slot (a fresh
+	// TURN allocation plus its DTLS-SRTP handshake). Without it a dead slot
+	// stays dead for the life of the session, which is how the tunnel used to
+	// rot: allocations died one by one and nothing replaced them, so the pool
+	// silently shrank to zero while the UI still said "On".
+	Redial func(idx int) (net.Conn, error)
 
 	logger *log.Logger // optional; nil disables probe-loop logging
 
@@ -64,11 +74,24 @@ type SRTPBind struct {
 	// Open() time. lastPongUnix stores Unix seconds of the most recent
 	// probe-echo for conn i; dead[i] is set when the watchdog gives up
 	// on a conn (subsequent Send picks skip it).
-	lastPongUnix  []atomic.Int64
-	pingSeq       []atomic.Uint64
-	dead          []atomic.Bool
-	serverProbed  atomic.Bool // any pong ever seen → probes are armed
+	lastPongUnix []atomic.Int64
+	pingSeq      []atomic.Uint64
+	dead         []atomic.Bool
+	serverProbed atomic.Bool // any pong ever seen → probes are armed
+
+	// nextRedialUnix[i] throttles slot i's replacement attempts, so a VK-side
+	// outage cannot turn into an allocate storm.
+	nextRedialUnix []atomic.Int64
+
+	// TxBytes / RxBytes are the tunnel's real byte counters. They exist so the
+	// UI can tell a stalled tunnel from an idle one; before this the SRTP path
+	// reported zero forever and a dead tunnel looked exactly like a quiet one.
+	TxBytes atomic.Uint64
+	RxBytes atomic.Uint64
 }
+
+// connBox wraps a conn so it can live in an atomic.Pointer.
+type connBox struct{ c net.Conn }
 
 type rxPacket struct {
 	data []byte
@@ -85,6 +108,11 @@ const (
 	// degradation, behaviour identical to a pre-probe build).
 	probeInterval       = 30 * time.Second
 	probeStaleThreshold = 120 * time.Second
+
+	// redialBackoff throttles per-slot replacement attempts so a VK-side
+	// outage cannot turn into an allocate storm (VK rate-limits allocates and
+	// answers 486 past 10 per credential).
+	redialBackoff = 15 * time.Second
 )
 
 var probePingMagic = []byte{0xff, 'P', 'N', 'G'}
@@ -132,14 +160,19 @@ func NewSRTPBind(conns []net.Conn) *SRTPBind {
 	if len(conns) == 0 {
 		conns = nil
 	}
-	return &SRTPBind{
-		conns:        conns,
-		closed:       make(chan struct{}),
-		rxCh:         make(chan rxPacket, srtpBindRxBufSize),
-		lastPongUnix: make([]atomic.Int64, len(conns)),
-		pingSeq:      make([]atomic.Uint64, len(conns)),
-		dead:         make([]atomic.Bool, len(conns)),
+	b := &SRTPBind{
+		closed:         make(chan struct{}),
+		rxCh:           make(chan rxPacket, srtpBindRxBufSize),
+		slots:          make([]atomic.Pointer[connBox], len(conns)),
+		lastPongUnix:   make([]atomic.Int64, len(conns)),
+		pingSeq:        make([]atomic.Uint64, len(conns)),
+		dead:           make([]atomic.Bool, len(conns)),
+		nextRedialUnix: make([]atomic.Int64, len(conns)),
 	}
+	for i, c := range conns {
+		b.slots[i].Store(&connBox{c: c})
+	}
+	return b
 }
 
 // SetLogger optionally wires a logger for the probe loop. Call before
@@ -157,7 +190,7 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if b.open {
 		return nil, 0, errors.New("SRTPBind: already open")
 	}
-	if len(b.conns) == 0 {
+	if len(b.slots) == 0 {
 		return nil, 0, errors.New("SRTPBind: no SRTP conns")
 	}
 	b.open = true
@@ -166,10 +199,14 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 	// to avoid concurrent writes; probe sender uses a tiny dedicated
 	// buffer (12 bytes per ping). Watchdog runs once per bind.
 	b.rxOnce.Do(func() {
-		for i, c := range b.conns {
+		for i := range b.slots {
+			box := b.slots[i].Load()
+			if box == nil {
+				continue
+			}
 			b.rxWG.Add(2)
-			go b.readerLoop(i, c)
-			go b.probeSenderLoop(i, c)
+			go b.readerLoop(i, box.c)
+			go b.probeSenderLoop(i, box.c)
 		}
 		b.rxWG.Add(1)
 		go b.zombieWatchdog()
@@ -215,6 +252,7 @@ func (b *SRTPBind) readerLoop(idx int, c net.Conn) {
 		// Copy to a per-packet slice so the next Read can reuse buf.
 		// Buffer is pulled from bindPktPool; recv closure Puts it back
 		// after copying out to WG's destination.
+		b.RxBytes.Add(uint64(n))
 		pkt := bindPktPoolGet(n)
 		copy(pkt, buf[:n])
 		select {
@@ -297,47 +335,108 @@ func (b *SRTPBind) zombieWatchdog() {
 			}
 			now := time.Now().Unix()
 			alive := 0
-			for i := range b.conns {
+			for i := range b.slots {
 				if b.dead[i].Load() {
+					b.tryRedial(i, now)
 					continue
 				}
 				last := b.lastPongUnix[i].Load()
 				if last > 0 && now-last > int64(probeStaleThreshold/time.Second) {
 					b.dead[i].Store(true)
-					_ = b.conns[i].Close() // wakes the reader
+					if box := b.slots[i].Load(); box != nil {
+						_ = box.c.Close() // wakes the reader
+					}
 					if b.logger != nil {
 						b.logger.Printf("srtp-bind: conn %d zombie (last pong %ds ago) — killed", i, now-last)
 					}
+					b.tryRedial(i, now)
 					continue
 				}
 				alive++
 			}
 			if alive == 0 && b.logger != nil {
-				b.logger.Printf("srtp-bind: WARN — all %d conns zombie; supervisor should retry the session", len(b.conns))
+				b.logger.Printf("srtp-bind: WARN — all %d conns are dead; replacing them (Redial set: %v)",
+					len(b.slots), b.Redial != nil)
 			}
 		}
+	}
+}
+
+// tryRedial replaces one dead slot's transport, at most once per
+// redialBackoff seconds per slot. A replaced slot rejoins the round-robin
+// immediately; if Redial is unset or fails, the slot simply stays dead and we
+// try again after the backoff.
+func (b *SRTPBind) tryRedial(idx int, nowUnix int64) {
+	if b.Redial == nil {
+		return
+	}
+	select {
+	case <-b.closed:
+		return
+	default:
+	}
+	if next := b.nextRedialUnix[idx].Load(); next > nowUnix {
+		return
+	}
+	b.nextRedialUnix[idx].Store(nowUnix + int64(redialBackoff/time.Second))
+
+	nc, err := b.Redial(idx)
+	if err != nil {
+		if b.logger != nil {
+			b.logger.Printf("srtp-bind: conn %d redial failed: %v", idx, err)
+		}
+		return
+	}
+	// Losing the race with Close must not leak the fresh conn.
+	select {
+	case <-b.closed:
+		_ = nc.Close()
+		return
+	default:
+	}
+	old := b.slots[idx].Swap(&connBox{c: nc})
+	if old != nil {
+		_ = old.c.Close()
+	}
+	b.lastPongUnix[idx].Store(nowUnix)
+	b.dead[idx].Store(false)
+	b.rxWG.Add(2)
+	go b.readerLoop(idx, nc)
+	go b.probeSenderLoop(idx, nc)
+	if b.logger != nil {
+		b.logger.Printf("srtp-bind: conn %d replaced — back in the rotation", idx)
 	}
 }
 
 func (b *SRTPBind) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.open {
-		return nil
-	}
-	b.open = false
+	// Close is independent of Open on purpose. A bind that was constructed but
+	// never opened — which happens on every setup path that fails between
+	// NewSRTPBind and wireguard-go bringing the device up — used to return here
+	// without closing its conns or signalling b.closed, so the conns leaked and
+	// a late redial could still repopulate a slot.
 	select {
 	case <-b.closed:
+		return nil // already closed
 	default:
 		close(b.closed)
 	}
+	wasOpen := b.open
+	b.open = false
 	var firstErr error
-	for _, c := range b.conns {
-		if err := c.Close(); err != nil && firstErr == nil {
+	for i := range b.slots {
+		box := b.slots[i].Swap(nil)
+		if box == nil {
+			continue
+		}
+		if err := box.c.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	b.rxWG.Wait()
+	if wasOpen {
+		b.rxWG.Wait()
+	}
 	close(b.rxCh)
 	return firstErr
 }
@@ -349,10 +448,10 @@ func (b *SRTPBind) SetMark(uint32) error { return nil }
 // surfaces it as a handshake failure (which the session supervisor
 // then handles).
 func (b *SRTPBind) Send(bufs [][]byte, _ conn.Endpoint) error {
-	if len(b.conns) == 0 {
+	if len(b.slots) == 0 {
 		return net.ErrClosed
 	}
-	n := uint64(len(b.conns))
+	n := uint64(len(b.slots))
 	for _, buf := range bufs {
 		// Round-robin with up to N tries to skip dead conns. If every
 		// slot is dead the loop returns net.ErrClosed.
@@ -364,11 +463,17 @@ func (b *SRTPBind) Send(bufs [][]byte, _ conn.Endpoint) error {
 				lastErr = net.ErrClosed
 				continue
 			}
-			if _, err := b.conns[idx].Write(buf); err != nil {
+			box := b.slots[idx].Load()
+			if box == nil {
+				lastErr = net.ErrClosed
+				continue
+			}
+			if _, err := box.c.Write(buf); err != nil {
 				b.dead[idx].Store(true)
 				lastErr = err
 				continue
 			}
+			b.TxBytes.Add(uint64(len(buf)))
 			sent = true
 			break
 		}
@@ -403,12 +508,12 @@ type LivenessSnapshot struct {
 // Liveness returns a point-in-time snapshot of the probe state.
 func (b *SRTPBind) Liveness() LivenessSnapshot {
 	snap := LivenessSnapshot{
-		NumConns:      len(b.conns),
+		NumConns:      len(b.slots),
 		ServerProbed:  b.serverProbed.Load(),
-		LastPongAgoMs: make([]int64, len(b.conns)),
+		LastPongAgoMs: make([]int64, len(b.slots)),
 	}
 	now := time.Now().Unix()
-	for i := range b.conns {
+	for i := range b.slots {
 		if b.dead[i].Load() {
 			snap.Dead++
 			snap.LastPongAgoMs[i] = -1

@@ -392,9 +392,8 @@ type packetConnAdapter struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 
-	mu    sync.Mutex
-	dlExp time.Time
-	dlCh  chan struct{}
+	mu sync.Mutex
+	dl deadline
 }
 
 func (a *packetConnAdapter) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -441,60 +440,11 @@ func (a *packetConnAdapter) Close() error {
 	return nil
 }
 
-func (a *packetConnAdapter) deadlineCh() <-chan struct{} {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.dlCh == nil {
-		a.dlCh = make(chan struct{})
-	}
-	return a.dlCh
-}
+func (a *packetConnAdapter) deadlineCh() <-chan struct{} { return a.dl.wait() }
 
-func (a *packetConnAdapter) deadlineExpired() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return !a.dlExp.IsZero() && !time.Now().Before(a.dlExp)
-}
+func (a *packetConnAdapter) deadlineExpired() bool { return a.dl.expired() }
 
-func (a *packetConnAdapter) setDl(t time.Time) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.dlCh != nil {
-		select {
-		case <-a.dlCh:
-		default:
-			close(a.dlCh)
-		}
-	}
-	a.dlCh = make(chan struct{})
-	a.dlExp = t
-	if !t.IsZero() {
-		dur := time.Until(t)
-		if dur <= 0 {
-			close(a.dlCh)
-			return
-		}
-		ch := a.dlCh
-		// CAS-style timer callback: only close ch if it's still the
-		// current deadline channel AND not already closed. Without this
-		// guard, setDl(t1) → setDl(t2) closes ch1 inline, then ch1's
-		// orphan timer fires and panics with "close of closed channel".
-		// Observed 2026-05-20 on the server side simultaneously with
-		// the iOS-side wrappedConn variant — same bug pattern.
-		time.AfterFunc(dur, func() {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			if a.dlCh != ch {
-				return
-			}
-			select {
-			case <-ch:
-			default:
-				close(ch)
-			}
-		})
-	}
-}
+func (a *packetConnAdapter) setDl(t time.Time) { a.dl.set(t) }
 
 // ─── wrappedConn — the SRTP-encrypted net.Conn ────────────────────────────
 
@@ -516,9 +466,7 @@ type wrappedConn struct {
 	closed    chan struct{}
 	onClose   func()
 
-	dlMu  sync.Mutex
-	dlExp time.Time
-	dlCh  chan struct{}
+	dl deadline
 
 	// stopDemux is set on the client side so Close() unwinds the
 	// background packet demux goroutine.
@@ -704,59 +652,11 @@ func (c *wrappedConn) SetReadDeadline(t time.Time) error {
 }
 func (c *wrappedConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-func (c *wrappedConn) deadlineCh() <-chan struct{} {
-	c.dlMu.Lock()
-	defer c.dlMu.Unlock()
-	if c.dlCh == nil {
-		c.dlCh = make(chan struct{})
-	}
-	return c.dlCh
-}
+func (c *wrappedConn) deadlineCh() <-chan struct{} { return c.dl.wait() }
 
-func (c *wrappedConn) deadlineExpired() bool {
-	c.dlMu.Lock()
-	defer c.dlMu.Unlock()
-	return !c.dlExp.IsZero() && !time.Now().Before(c.dlExp)
-}
+func (c *wrappedConn) deadlineExpired() bool { return c.dl.expired() }
 
-func (c *wrappedConn) setDl(t time.Time) {
-	c.dlMu.Lock()
-	defer c.dlMu.Unlock()
-	if c.dlCh != nil {
-		select {
-		case <-c.dlCh:
-		default:
-			close(c.dlCh)
-		}
-	}
-	c.dlCh = make(chan struct{})
-	c.dlExp = t
-	if !t.IsZero() {
-		dur := time.Until(t)
-		if dur <= 0 {
-			close(c.dlCh)
-			return
-		}
-		ch := c.dlCh
-		// See pkg/proxy/srtpwrap setDl for the full explanation. Same
-		// "close of closed channel" race: setDl(t1) → setDl(t2) closes
-		// ch1 inline; later ch1's orphan timer fires and panics. Server
-		// side observed crashing 2026-05-20 simultaneously with iOS
-		// build 121 around T+32s of every session.
-		time.AfterFunc(dur, func() {
-			c.dlMu.Lock()
-			defer c.dlMu.Unlock()
-			if c.dlCh != ch {
-				return
-			}
-			select {
-			case <-ch:
-			default:
-				close(ch)
-			}
-		})
-	}
-}
+func (c *wrappedConn) setDl(t time.Time) { c.dl.set(t) }
 
 // ─── client-side demux from a single-peer PacketConn ──────────────────────
 

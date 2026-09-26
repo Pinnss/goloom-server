@@ -31,7 +31,6 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/Pinnss/goloom-server/internal/identity"
-	"github.com/Pinnss/goloom-server/internal/relay/vkturnsrtp"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/internal/tun"
 	"github.com/Pinnss/goloom-server/pkg/vkauth"
@@ -123,50 +122,22 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		return errors.New("vk-turn-srtp: VK returned no usable TURN endpoints (all were turns:// or unparseable)")
 	}
 
-	allocs := make([]*TURNAllocation, 0, numConns)
-	srtpConns := make([]net.Conn, 0, numConns)
-	cleanup := func() {
-		for _, c := range srtpConns {
-			_ = c.Close()
-		}
-		for _, a := range allocs {
-			a.Close()
-		}
+	pool, srtpConns, err := NewSRTPPool(ctx, turnEndpoints, cfg.VKTurnSRTP.PeerAddress, creds, numConns, lg)
+	if err != nil {
+		return fmt.Errorf("vk-turn-srtp: %w", err)
 	}
+	poolOwned := true
 	defer func() {
-		if len(srtpConns) != numConns {
-			cleanup() // partial setup — clean up early
+		if poolOwned {
+			pool.Close()
+			for _, c := range srtpConns {
+				_ = c.Close()
+			}
 		}
 	}()
-	for i := 0; i < numConns; i++ {
-		hp := turnEndpoints[i%len(turnEndpoints)] // round-robin across endpoints
-		a, allocErr := AllocateTURN(ctx, hp, cfg.VKTurnSRTP.PeerAddress, creds)
-		if allocErr != nil {
-			lg.Printf("vk-turn-srtp: TURN allocate %d/%d against %s failed: %v", i+1, numConns, hp, allocErr)
-			continue
-		}
-		hsCtx, hsCancel := context.WithTimeout(ctx, 15*time.Second)
-		conn, hsErr := vkturnsrtp.Client(hsCtx, a.Relay(), a.PeerAddr())
-		hsCancel()
-		if hsErr != nil {
-			lg.Printf("vk-turn-srtp: DTLS-SRTP handshake %d/%d failed: %v", i+1, numConns, hsErr)
-			a.Close()
-			continue
-		}
-		allocs = append(allocs, a)
-		srtpConns = append(srtpConns, conn)
-		lg.Printf("vk-turn-srtp: conn %d/%d up — TURN=%s relay=%s", i+1, numConns, hp, a.relay.LocalAddr())
-	}
-	if len(srtpConns) == 0 {
-		return errors.New("vk-turn-srtp: every TURN allocate / DTLS handshake failed")
-	}
 	if len(srtpConns) < numConns {
-		lg.Printf("vk-turn-srtp: only %d/%d conns survived setup — running with reduced parallelism", len(srtpConns), numConns)
+		lg.Printf("vk-turn-srtp: only %d/%d conns survived setup — the bind watchdog will keep filling the rest", len(srtpConns), numConns)
 	}
-	// All-or-cleanup is no longer required; mark setup complete by
-	// resizing numConns to the successful subset so the deferred
-	// cleanup check passes.
-	numConns = len(srtpConns)
 
 	// ── 4. Wintun + wireguard-go bound to the SRTP conn ─────────────
 	dns := cfg.WG.DNS
@@ -189,6 +160,10 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 	}()
 
 	bind := NewSRTPBind(srtpConns)
+	bind.SetLogger(lg)
+	// Dead allocations are rebuilt instead of only retired, so the pool cannot
+	// silently shrink to nothing over a long session.
+	bind.Redial = pool.Redial
 	wgLogger := &device.Logger{
 		Verbosef: func(format string, args ...any) { lg.Printf("WG-USERSPACE: "+format, args...) },
 		Errorf:   func(format string, args ...any) { lg.Printf("WARN WG-USERSPACE: "+format, args...) },

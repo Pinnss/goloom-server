@@ -154,35 +154,11 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 		Password: authRes.TurnPass,
 		UseTCP:   !cfg.VKTurnSRTP.UseUDPForTURN,
 	}
-	var (
-		allocs    []*wgclient.TURNAllocation
-		srtpConns []net.Conn
-	)
-	for i := 0; i < numConns; i++ {
-		hp := turnEndpoints[i%len(turnEndpoints)]
-		alloc, allocErr := wgclient.AllocateTURN(parentCtx, hp, cfg.VKTurnSRTP.PeerAddress, creds)
-		if allocErr != nil {
-			c.logger.Printf("vk-turn-srtp: TURN allocate %d/%d via %s failed: %v", i+1, numConns, hp, allocErr)
-			continue
-		}
-		hsCtx, hsCancel := context.WithTimeout(parentCtx, 15*time.Second)
-		conn, hsErr := vkturnsrtp.Client(hsCtx, alloc.Relay(), alloc.PeerAddr())
-		hsCancel()
-		if hsErr != nil {
-			c.logger.Printf("vk-turn-srtp: DTLS-SRTP handshake %d/%d failed: %v", i+1, numConns, hsErr)
-			alloc.Close()
-			continue
-		}
-		allocs = append(allocs, alloc)
-		srtpConns = append(srtpConns, conn)
-		c.logger.Printf("vk-turn-srtp: conn %d/%d up via %s", i+1, numConns, hp)
-	}
-	if len(srtpConns) == 0 {
+	pool, srtpConns, poolErr := wgclient.NewSRTPPool(
+		parentCtx, turnEndpoints, cfg.VKTurnSRTP.PeerAddress, creds, numConns, c.logger)
+	if poolErr != nil {
 		cancel()
-		for _, a := range allocs {
-			a.Close()
-		}
-		err := mobileErr(ErrSessionSetup, errors.New("every TURN allocate / DTLS handshake failed"))
+		err := mobileErr(ErrSessionSetup, poolErr)
 		c.recordErr(err)
 		c.emitPhase("error", err.Error())
 		return "", err
@@ -193,7 +169,7 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 
 	// ── adopt TUN fd + bring wireguard-go up over the SRTP pool ────
 	c.emitPhase("wg_setup", "adopting TUN fd")
-	if err := adoptTUNWithSRTPBind(c, tunFd, srtpConns, cfg.WG); err != nil {
+	if err := adoptTUNWithSRTPBind(c, tunFd, srtpConns, cfg.WG, pool); err != nil {
 		cancel()
 		for _, conn := range srtpConns {
 			_ = conn.Close()
@@ -213,9 +189,7 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 	// triggered by the cancel() on Disconnect.
 	go func() {
 		<-parentCtx.Done()
-		for _, a := range allocs {
-			a.Close()
-		}
+		pool.Close()
 	}()
 
 	c.running.Store(true)
@@ -238,7 +212,7 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 // device up. Stored in the package-global wgEmbed singleton so
 // disconnectEmbedded (called from Disconnect) closes both wg and
 // TUN uniformly.
-func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclient.WGParams) error {
+func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclient.WGParams, pool *wgclient.SRTPPool) error {
 	embedded.mu.Lock()
 	defer embedded.mu.Unlock()
 
@@ -263,6 +237,12 @@ func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclien
 	}
 
 	bind := wgclient.NewSRTPBind(srtpConns)
+	bind.SetLogger(c.logger)
+	if pool != nil {
+		// Let the bind's watchdog rebuild a slot instead of only retiring it.
+		bind.Redial = pool.Redial
+	}
+	c.srtpBind.Store(bind)
 	dev := device.NewDevice(tunDev, bind, logger)
 
 	privHex, err := keyB64ToHex(wg.ClientPrivateKey)

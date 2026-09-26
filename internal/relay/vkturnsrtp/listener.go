@@ -120,6 +120,14 @@ func (l *listener) handle(conn net.Conn) {
 	l.log.Printf("vkturnsrtp: session closed: %s", conn.RemoteAddr())
 }
 
+// srtpIdleDeadline is how long a relayed SRTP conn may sit silent before its
+// read fails; srtpDeadlineRearm is how often we bother pushing that deadline
+// forward. The gap between them is what keeps the timer churn bounded.
+const (
+	srtpIdleDeadline  = 30 * time.Minute
+	srtpDeadlineRearm = 1 * time.Minute
+)
+
 // forwardUDP pumps bytes bidirectionally between the SRTP-wrapped
 // session and a fresh local UDP socket dialled to ConnectAddr.
 // Includes the probe-echo gate from anton48: a sentinel packet
@@ -161,15 +169,22 @@ func (l *listener) forwardUDP(conn net.Conn) {
 		defer wg.Done()
 		defer sessCancel()
 		buf := make([]byte, 1600)
+		var lastDeadline time.Time
 		for {
 			select {
 			case <-sessCtx.Done():
 				return
 			default:
 			}
-			if err := conn.SetReadDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				logIOErr("set srtp read deadline", err)
-				return
+			// Re-arm the idle deadline sparingly, not per packet: it only has
+			// to be in the future, and each call used to allocate a timer plus
+			// a channel that lived for the full 30 minutes (see deadline.go).
+			if time.Since(lastDeadline) > srtpDeadlineRearm {
+				if err := conn.SetReadDeadline(time.Now().Add(srtpIdleDeadline)); err != nil {
+					logIOErr("set srtp read deadline", err)
+					return
+				}
+				lastDeadline = time.Now()
 			}
 			n, err := conn.Read(buf)
 			if err != nil {

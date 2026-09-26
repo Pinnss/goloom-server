@@ -46,6 +46,7 @@ import (
 	"github.com/Pinnss/goloom-server/internal/tunnel"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
 	"github.com/Pinnss/goloom-server/pkg/vkauth"
+	"github.com/Pinnss/goloom-server/pkg/wgclient"
 )
 
 // SocketProtector lets the native side mark sockets as bypass-VPN.
@@ -101,9 +102,9 @@ type Client struct {
 	logger  *log.Logger
 	logSink LogSink
 
-	phaseMu    sync.Mutex
-	phaseHook  PhaseListener
-	browserCB  BrowserLauncher
+	phaseMu   sync.Mutex
+	phaseHook PhaseListener
+	browserCB BrowserLauncher
 
 	connectedTo string
 	displayName string
@@ -133,6 +134,12 @@ type Client struct {
 	sessionDone chan error
 
 	tx, rx atomic.Uint64
+
+	// srtpBind is the live vk-turn-srtp bind, when that transport is the one
+	// running. Held so StatsJSON can report real tunnel bytes: the SRTP path
+	// used to leave tx/rx at zero forever, which made a stalled tunnel
+	// indistinguishable from an idle one in the UI.
+	srtpBind atomic.Pointer[wgclient.SRTPBind]
 }
 
 // NewClient returns an idle Client. Hook up SetSocketProtector and
@@ -217,11 +224,11 @@ func (c *Client) emitPhase(phase, detail string) {
 // ConnectResult is what Connect() returns serialised as JSON. Callers
 // parse it on the native side to set up VPN routes / excluded ranges.
 type ConnectResult struct {
-	DisplayName  string   `json:"display_name"`
-	PeerID       string   `json:"peer_id"`
-	ListenAddr   string   `json:"listen_addr"`
-	TelemostIPs  []string `json:"telemost_ips"` // /32 networks the native side should route via underlying iface, NOT through the VPN
-	WGEndpoint   string   `json:"wg_endpoint"`  // matches ListenAddr — what the WG client config should set as Endpoint
+	DisplayName string   `json:"display_name"`
+	PeerID      string   `json:"peer_id"`
+	ListenAddr  string   `json:"listen_addr"`
+	TelemostIPs []string `json:"telemost_ips"` // /32 networks the native side should route via underlying iface, NOT through the VPN
+	WGEndpoint  string   `json:"wg_endpoint"`  // matches ListenAddr — what the WG client config should set as Endpoint
 
 	// Populated when the connection string carries a complete embedded
 	// WG profile (admin-panel auto-provisioned inbounds). Native code
@@ -394,7 +401,8 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	cameraSender.Start()
 
 	// Live getStats-shaped telemetry instead of the empty `{}` stub: a sibling
-	// project measured that the stub trips an SFU validator (5 s of clean media vs 22 s
+	// project measured that the stub trips an SFU validator (5 s of clean
+	// media vs 22 s
 	// without it). Until 2026-09 only the server side sent a real report.
 	sess.Client.SetTelemetryProvider(session.NewPublisherStatsProvider(cameraSender, sess.Publisher()))
 
@@ -411,7 +419,6 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	// onTWCC=nil: the phone→server direction already forwards fine; congestion
 	// control is wired on the server publisher path (see internal/sfu/telemost).
 	session.StartRTCPLoop(ctx, c.logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, nil)
-
 
 	// Slot-subscription keepalive, started only after pairing: the SFU stops
 	// forwarding the server's video ~45 s after the last setSlots.
@@ -622,6 +629,13 @@ func (c *Client) StatsJSON() string {
 		TxBytes:   c.tx.Load(),
 		RxBytes:   c.rx.Load(),
 		Connected: c.running.Load(),
+	}
+	// vk-turn-srtp keeps its counters on the bind rather than a WGJoiner, and
+	// has no stats loop of its own: read them straight through, so "On but not
+	// moving a byte" is visible instead of looking identical to idle.
+	if bind := c.srtpBind.Load(); bind != nil {
+		out.TxBytes = bind.TxBytes.Load()
+		out.RxBytes = bind.RxBytes.Load()
 	}
 	b, _ := json.Marshal(out)
 	return string(b)

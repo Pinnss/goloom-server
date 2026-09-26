@@ -26,7 +26,7 @@ import (
 //      real VP8 interframe to keep the SFU's track-active timers happy
 //      (without it the SFU eventually stops forwarding the slot).
 //
-// Tuning is informed by a sibling project measurements: pacing 500µs +
+// Tuning is informed by a sibling project: pacing 500µs +
 // batching 6KB/2ms got their tunnel from 6 Mbit/s to ~50 Mbit/s
 // sustained, which appears to be Telemost's per-track bandwidth cap.
 type Sender struct {
