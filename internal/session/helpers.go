@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -65,7 +66,22 @@ func InjectBandwidthAttribute(sdp string, kind string, kbps int) string {
 }
 
 const HandshakeInterval = 500 * time.Millisecond
-const HandshakeTimeout = 120 * time.Second
+// ErrHandshakeTimeout is returned when a pairing attempt runs out of time.
+// Callers use it to decide whether rejoining is worth trying: it is the
+// signature of a peer whose video the SFU never bound, which a fresh session
+// usually fixes.
+var ErrHandshakeTimeout = errors.New("handshake timeout")
+
+// HandshakeTimeout bounds one pairing attempt. It used to be 120 s, on the
+// assumption that a slow peer just needed time. Measured 2026-09-26: when the
+// SFU leaves our slot bound with an empty mid it NEVER resolves on its own —
+// the peer's video simply never arrives, and nothing we send changes that (a
+// setSlots re-ask during pairing makes it worse, see RunSlotKeepalive). Every
+// observed recovery came from tearing the session down and joining again, which
+// the supervisor does. So a short deadline is strictly better: it converts a
+// two-minute dead wait into a retry that usually lands a working binding within
+// seconds. Still comfortably above the 1-3 s a healthy pairing takes.
+const HandshakeTimeout = 20 * time.Second
 
 func Handshake(ctx context.Context, lg *log.Logger, sess *Session, sender *tunnel.Sender, in <-chan tunnel.ReceivedFrame, round byte) (string, error) {
 	deadline := time.Now().Add(HandshakeTimeout)
@@ -96,8 +112,8 @@ func Handshake(ctx context.Context, lg *log.Logger, sess *Session, sender *tunne
 		}
 		select {
 		case <-deadCtx.Done():
-			return "", fmt.Errorf("handshake timeout round=%d (peerID=%q gotHello=%v gotAck=%v sentAck=%v)",
-				round, peerID, receivedHello, receivedAck, sentAck)
+			return "", fmt.Errorf("%w round=%d (peerID=%q gotHello=%v gotAck=%v sentAck=%v)",
+				ErrHandshakeTimeout, round, peerID, receivedHello, receivedAck, sentAck)
 		case <-tk.C:
 			// Keep advertising until the handshake is FULLY established
 			// (our peer has ACKed us → receivedAck). The old code stopped

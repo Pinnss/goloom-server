@@ -44,7 +44,12 @@ func NewRateController(initialBps float64) *RateController {
 		MaxBps:      40_000_000,
 		LowLoss:     0.005, // 0.5%
 		HighLoss:    0.01,  // 1% — keep NACKs near zero, we cannot retransmit
-		IncreaseMul: 1.03,
+		// 1.03 per feedback window needed ~130 windows (tens of seconds) to walk
+		// from the seed to a 60 Mbps ceiling, which users see as "everything
+		// barely loads for the first half-minute". 1.12 covers the same range in
+		// ~20 windows, a few seconds, and the loss-based decrease still reacts
+		// within one window.
+		IncreaseMul: 1.12,
 		EMAWeight:   0.20,
 	}
 }

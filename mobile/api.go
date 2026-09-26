@@ -239,6 +239,11 @@ type ConnectResult struct {
 // alive: if the server restarts and asks us to re-handshake, we do so
 // transparently without the native side needing to be told. Watch
 // IsConnected() / StatsJSON() for liveness.
+// connectAttempts bounds the in-Connect pairing retries (see the loop below).
+// Four attempts at a 20 s handshake deadline keep the worst case near a minute,
+// which is what the old single 120 s attempt cost anyway.
+const connectAttempts = 4
+
 func (c *Client) Connect(connectionString string, listenAddr string) (string, error) {
 	c.mu.Lock()
 	if c.running.Load() {
@@ -275,14 +280,31 @@ func (c *Client) Connect(connectionString string, listenAddr string) (string, er
 
 	// Dispatch на нужный transport. Telemost — старый монолитный
 	// session.SetupSession path. VK Calls — vkcalls.Transport.
+	// Pairing can fail for a reason no client can influence: the SFU binds our
+	// slot to the peer but leaves the mid empty, so the peer's video never
+	// arrives and the in-band handshake cannot complete. It never recovers
+	// within a session, and rejoining usually lands a working binding at once
+	// (measured 2026-09-26 on both Android and Windows). Retry here rather than
+	// making the user tap Connect again; the background supervisor takes over
+	// once we are up.
 	var res ConnectResult
-	switch params.Transport {
-	case "vk-calls":
-		res, err = c.runVKSession(parentCtx, params, listenAddr)
-	case "", "telemost":
-		res, err = c.runSession(parentCtx, params, listenAddr)
-	default:
-		err = fmt.Errorf("unsupported transport %q", params.Transport)
+	for attempt := 1; ; attempt++ {
+		switch params.Transport {
+		case "vk-calls":
+			res, err = c.runVKSession(parentCtx, params, listenAddr)
+		case "", "telemost":
+			res, err = c.runSession(parentCtx, params, listenAddr)
+		default:
+			err = fmt.Errorf("unsupported transport %q", params.Transport)
+		}
+		if err == nil || parentCtx.Err() != nil || attempt >= connectAttempts {
+			break
+		}
+		if !errors.Is(err, session.ErrHandshakeTimeout) {
+			break
+		}
+		c.logger.Printf("pairing attempt %d/%d did not bind the peer video — rejoining", attempt, connectAttempts)
+		c.emitPhase("handshake", fmt.Sprintf("retrying (%d/%d)", attempt+1, connectAttempts))
 	}
 	if err != nil {
 		cancel()

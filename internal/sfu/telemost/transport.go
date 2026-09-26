@@ -171,10 +171,17 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	// sat at the cap with lossEMA=0.00% and no drops, so the cap — not loss — is
 	// the ceiling; GOLOOM_MAX_MBPS raises it per run to find the real one.
 	maxBps := envBps("GOLOOM_MAX_MBPS", 1_500_000)
-	rateCtl := tunnel.NewRateController(math.Min(1_200_000, maxBps))
+	// Seed at a quarter of the ceiling rather than a flat 1.2 Mbps. The old seed
+	// meant every fresh session — including every reconnect after an rx-stall —
+	// crawled for tens of seconds before the controller walked up to a rate the
+	// path had already proven it could carry, which is exactly what a user
+	// reports as "it barely loads at first". The loss-based decrease still owns
+	// the downside, and it reacts within one feedback window.
+	initialBps := math.Max(math.Min(maxBps, 4_000_000), maxBps/4)
+	rateCtl := tunnel.NewRateController(initialBps)
 	rateCtl.MaxBps = maxBps
-	lg.Printf("CC cap=%.2f Mbps (GOLOOM_MAX_MBPS)", maxBps/1e6)
 	cameraSender.SetRateLimit(uint64(rateCtl.Target()))
+	lg.Printf("CC cap=%.2f Mbps start=%.2f Mbps (GOLOOM_MAX_MBPS)", maxBps/1e6, initialBps/1e6)
 	onTWCC := func(delivered, lost int) {
 		cameraSender.SetRateLimit(uint64(rateCtl.Observe(delivered, lost)))
 	}
