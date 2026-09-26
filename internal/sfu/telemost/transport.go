@@ -170,7 +170,14 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	// TCP-over-WG adapts. 2026-09-26: with the media binding now holding, a run
 	// sat at the cap with lossEMA=0.00% and no drops, so the cap — not loss — is
 	// the ceiling; GOLOOM_MAX_MBPS raises it per run to find the real one.
-	maxBps := envBps("GOLOOM_MAX_MBPS", 1_500_000)
+	// 60 Mbps, measured rather than guessed. The July default of 1.5 Mbps was
+	// set when any overshoot cost us the video binding; with RTCP answered and
+	// loss-reactive pacing, a phone sustained 20-25 Mbit/s down and 30-60 up at
+	// lossEMA=0.00% with zero sender drops, and raising the ceiling from 60 to
+	// 200 changed nothing — so the path, not the ceiling, is the limit above
+	// this. Keeping a finite ceiling still bounds how badly we can overshoot a
+	// weak last mile before the controller reacts.
+	maxBps := envBps("GOLOOM_MAX_MBPS", 60_000_000)
 	// Seed at a quarter of the ceiling rather than a flat 1.2 Mbps. The old seed
 	// meant every fresh session — including every reconnect after an rx-stall —
 	// crawled for tens of seconds before the controller walked up to a rate the
