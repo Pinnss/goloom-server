@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -392,6 +393,12 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 		return nil, fmt.Errorf("send sub answer: %w", err)
 	}
 	lg.Printf("STAGE6 ✓ SUB answer sent (sdp=%d)", len(subAnswer.SDP))
+	// The subscriber direction is where "slot bound but mid= empty" lives: the
+	// SFU can only hand a peer's video to us on an m-line we accepted. Summarise
+	// both sides of that negotiation so a failure is readable from the log
+	// instead of needing a packet capture.
+	logMLines(lg, "SUB OFFER (from SFU)", subOff.SDP)
+	logMLines(lg, "SUB ANSWER (ours)", subAnswer.SDP)
 
 	// Wait both connected.
 	connectCtx, connectCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -427,6 +434,37 @@ func SetupSession(ctx context.Context, lg *log.Logger, meeting, displayName stri
 		return nil, fmt.Errorf("setSlots: %w", err)
 	}
 	lg.Printf("STAGE6.7 ✓ setSlots sent (slot[0]=3840x2160 slot[1]=1920x1080, key=2)")
+
+	// Renew the slot subscription from here on, i.e. BEFORE WaitForPeer and the
+	// in-band handshake — not after them.
+	//
+	// The SFU answers the first setSlots with a slotsConfig that binds the peer
+	// but often leaves the mid EMPTY ("participantVideoByMid=<peer> mid="), and
+	// it fills the mid in a LATER slotsConfig. Those later messages are only
+	// sent when something makes the SFU re-evaluate the layout: a participant
+	// joining or leaving, or another setSlots from us. In a quiet two-party room
+	// nothing ever does, so the mid stays empty, no video arrives, and the
+	// handshake — which rides inside the video — times out. Measured 2026-09-26:
+	// the phone sat at "mid=" for its full 2-minute budget and received only
+	// audio, while a PC in the same room happened to succeed because other
+	// participants were churning and each change produced a fresh slotsConfig.
+	//
+	// Starting the renewal after a successful handshake (as both callers used to)
+	// is therefore circular: the handshake needs video, video needs the mid, and
+	// the mid needs another setSlots. A 2026-07 note concluded the periodic
+	// rebind "cannot help because it never runs in the failing case" — the
+	// missing step was to run it earlier.
+	// 2026-09-26: EXPERIMENT, default OFF. Starting the renewal here (before
+	// WaitForPeer) was an attempt to fix "mid=" never filling in a quiet room.
+	// It made things WORSE: a PC that paired reliably stopped pairing at all,
+	// receiving a fresh slotsConfig per setSlots with the mid empty every time —
+	// so re-sending setSlots during pairing appears to RESTART the SFU's layout
+	// resolution rather than complete it. Kept behind a flag because the
+	// hypothesis is cheap to re-test on a stand.
+	if os.Getenv("GOLOOM_EARLY_SLOTS") == "1" {
+		lg.Printf("STAGE6.8 early slot keepalive ENABLED (GOLOOM_EARLY_SLOTS=1)")
+		go s.RunSlotKeepalive(ctx, 4)
+	}
 
 	go s.runSubRenegotiationLoop(ctx)
 	lg.Printf("SUB-RENEGO loop started — will process subsequent subscriberSdpOffers")
@@ -482,6 +520,8 @@ func (s *Session) runSubRenegotiationLoop(ctx context.Context) {
 			}
 
 			s.Logger.Printf("SUB-RENEGO ✓ answer sent (pcSeq=%d, sdp=%d bytes)", offer.PcSeq, len(answer.SDP))
+			logMLines(s.Logger, "SUB-RENEGO OFFER (from SFU)", offer.SDP)
+			logMLines(s.Logger, "SUB-RENEGO ANSWER (ours)", answer.SDP)
 			s.subRenegoDoneOnce.Do(func() { close(s.subRenegoDone) })
 
 			slotKey++
@@ -1085,4 +1125,50 @@ func waitOrTimeout[T any](ctx context.Context, ch <-chan T, d time.Duration, wha
 	case v := <-ch:
 		return v, nil
 	}
+}
+
+// logMLines prints one line per m= section: its index, media kind, port (0 =
+// rejected), mid, direction and payload types. That is enough to see whether a
+// video m-line exists at all, whether we rejected it, and which mid the SFU can
+// use for a slot binding.
+func logMLines(lg *log.Logger, label, sdp string) {
+	idx := -1
+	var kind, port, mid, dir, pts string
+	flush := func() {
+		if idx < 0 {
+			return
+		}
+		if mid == "" {
+			mid = "-"
+		}
+		if dir == "" {
+			dir = "-"
+		}
+		lg.Printf("%s m[%d] %s port=%s mid=%s %s pt=[%s]", label, idx, kind, port, mid, dir, pts)
+	}
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "m="):
+			flush()
+			idx++
+			mid, dir = "", ""
+			f := strings.Fields(strings.TrimPrefix(line, "m="))
+			kind, port, pts = "?", "?", ""
+			if len(f) > 0 {
+				kind = f[0]
+			}
+			if len(f) > 1 {
+				port = f[1]
+			}
+			if len(f) > 3 {
+				pts = strings.Join(f[3:], ",")
+			}
+		case strings.HasPrefix(line, "a=mid:"):
+			mid = strings.TrimPrefix(line, "a=mid:")
+		case line == "a=sendrecv", line == "a=recvonly", line == "a=sendonly", line == "a=inactive":
+			dir = strings.TrimPrefix(line, "a=")
+		}
+	}
+	flush()
 }

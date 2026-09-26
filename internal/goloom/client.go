@@ -63,6 +63,20 @@ type Client struct {
 	// ack can still be observed.
 	readAlive atomic.Bool
 
+	// wsCtx is what the socket reads and writes use. It deliberately does NOT
+	// inherit cancellation from the session context: coder/websocket tears the
+	// connection down when a read or write is cancelled mid-flight (the frame
+	// state cannot be resumed), and teardown cancels the session context BEFORE
+	// Close runs — which used to kill the socket a few milliseconds before our
+	// leave could be written, leaving a ghost participant behind. The socket's
+	// lifetime is now owned by Close alone.
+	wsCtx context.Context
+
+	// closedCh is closed by Close, so the backstop in Start can tell a normal
+	// teardown from a caller that cancelled and walked away.
+	closedCh  chan struct{}
+	closeOnce sync.Once
+
 	pingTicker      *time.Ticker
 	telemetryTicker *time.Ticker
 	tickersDone     chan struct{}
@@ -115,9 +129,36 @@ func (c *Client) OnIncoming(h IncomingHandler) { c.handler = h }
 // goroutines exit when ctx is cancelled or the WS errors.
 func (c *Client) Start(ctx context.Context) {
 	c.readAlive.Store(true)
+	c.wsCtx = context.WithoutCancel(ctx)
 	go c.writeLoop(ctx)
 	go c.readLoop(ctx)
+	// Backstop: the loops now exit on socket close rather than on cancellation,
+	// so if a caller cancels without ever calling Close they would linger. Give
+	// teardown time to say leave, then close anyway.
+	go func() {
+		<-ctx.Done()
+		select {
+		case <-c.closedCh:
+		case <-time.After(closeAfterCancelGrace):
+			_ = c.Close()
+		}
+	}()
 }
+
+// socketCtx returns the context for socket operations. It falls back to
+// Background when Start has not run, so a Client used without Start (tests)
+// still works.
+func (c *Client) socketCtx() context.Context {
+	if c.wsCtx == nil {
+		return context.Background()
+	}
+	return c.wsCtx
+}
+
+// closeAfterCancelGrace is how long the socket outlives a cancelled session
+// context before the backstop closes it. It only has to cover Session.Close
+// saying leave, so seconds are plenty.
+const closeAfterCancelGrace = 10 * time.Second
 
 // ConfigurePeriodicTasks starts the ping and telemetry timers using values
 // from serverHello. If either interval is zero we use sane defaults.
@@ -323,7 +364,7 @@ func (c *Client) writeLoop(ctx context.Context) {
 			return
 		case msg := <-c.sendQ:
 			c.writeMu.Lock()
-			err := c.ws.Write(ctx, websocket.MessageText, msg)
+			err := c.ws.Write(c.socketCtx(), websocket.MessageText, msg)
 			c.writeMu.Unlock()
 			if err != nil {
 				c.log.Printf("ws write err: %v", err)

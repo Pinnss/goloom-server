@@ -390,8 +390,9 @@ func (c *Client) runSession(parentCtx context.Context, params *connstr.Params, l
 	// control is wired on the server publisher path (see internal/sfu/telemost).
 	session.StartRTCPLoop(ctx, c.logger, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, nil)
 
-	// Slot-subscription keepalive: without it the SFU stops forwarding the
-	// server's video ~45 s after the last setSlots (see RunSlotKeepalive).
+
+	// Slot-subscription keepalive, started only after pairing: the SFU stops
+	// forwarding the server's video ~45 s after the last setSlots.
 	go sess.RunSlotKeepalive(ctx, 4)
 
 	dt := wgrelay.New(cameraSender, merged, c.logger)

@@ -193,8 +193,9 @@ func (Transport) Connect(ctx context.Context, spec sfu.ConnectSpec) (sfu.Session
 	}()
 	session.StartRTCPLoop(ctx, lg, "PUB-rtcp", sess.Pub.PC, pushKeyframeOnPLI, onTWCC)
 
-	// Slot-subscription keepalive: without it the SFU stops forwarding the
-	// peer's video ~45 s after the last setSlots (see RunSlotKeepalive).
+
+	// Slot-subscription keepalive, started only after pairing: the SFU stops
+	// forwarding the peer's video ~45 s after the last setSlots.
 	go sess.RunSlotKeepalive(ctx, 4)
 
 	dt := wgrelay.New(cameraSender, merged, lg)
