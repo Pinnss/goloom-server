@@ -1,6 +1,10 @@
 package vkauth
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
 
 // Slider-настройки VK кладёт в window.init на СТРАНИЦЕ, а не в ответ
 // captchaNotRobot.settings. Без них getContent отвечает ERROR — ровно так
@@ -69,14 +73,14 @@ func TestSameSite(t *testing.T) {
 		a, b string
 		want bool
 	}{
-		{"id.vk.ru", "api.vk.ru", true},        // captcha -> API: same-site
-		{"id.vk.ru", "static.vk.ru", true},     // captcha -> JS-бандл
-		{"id.vk.com", "api.vk.com", true},      // legacy-домен
-		{"id.vk.ru", "ad.mail.ru", false},      // adFp-загрузчик: cross-site
-		{"id.vk.ru", "api.vk.com", false},      // .ru и .com — разные сайты
-		{"id.vk.ru:443", "api.vk.ru", true},    // порт не мешает
-		{"localhost", "api.vk.ru", false},      // без точки — не путаем
-		{"ID.VK.RU", "api.vk.ru", true},        // регистр не важен
+		{"id.vk.ru", "api.vk.ru", true},     // captcha -> API: same-site
+		{"id.vk.ru", "static.vk.ru", true},  // captcha -> JS-бандл
+		{"id.vk.com", "api.vk.com", true},   // legacy-домен
+		{"id.vk.ru", "ad.mail.ru", false},   // adFp-загрузчик: cross-site
+		{"id.vk.ru", "api.vk.com", false},   // .ru и .com — разные сайты
+		{"id.vk.ru:443", "api.vk.ru", true}, // порт не мешает
+		{"localhost", "api.vk.ru", false},   // без точки — не путаем
+		{"ID.VK.RU", "api.vk.ru", true},     // регистр не важен
 	}
 	for _, c := range cases {
 		if got := sameSite(c.a, c.b); got != c.want {
@@ -157,5 +161,120 @@ func TestPickBrowserFP(t *testing.T) {
 				t.Fatalf("pickBrowserFP = (%q, %v), want (%q, %v)", fp, rotated, c.wantFP, c.wantRotated)
 			}
 		})
+	}
+}
+
+// VK stopped serving a <script src=…not_robot_captcha…> tag. The parser used to
+// bail out on that BEFORE reading the PoW input a few lines below, so a
+// perfectly solvable challenge was discarded and every connect fell back to a
+// manual WebView — which is unusable once we need one identity per allocation.
+func TestParseCaptchaV2PageWithoutScriptTag(t *testing.T) {
+	html := `<html><head>` +
+		`<script>window.init = {"data":{"show_captcha_type":"checkbox"}};</script>` +
+		`<script>const powInput = "deadbeef"; const difficulty = 4;</script>` +
+		`</head><body></body></html>`
+
+	page, err := parseCaptchaV2Page(html)
+	if err != nil {
+		t.Fatalf("parse failed without a script tag: %v", err)
+	}
+	if page.PowInput != "deadbeef" {
+		t.Errorf("PowInput = %q, want deadbeef", page.PowInput)
+	}
+	if page.PowDifficulty != 4 {
+		t.Errorf("PowDifficulty = %d, want 4", page.PowDifficulty)
+	}
+	if page.ShowType != "checkbox" {
+		t.Errorf("ShowType = %q, want checkbox", page.ShowType)
+	}
+	if page.ScriptURL != "" {
+		t.Errorf("ScriptURL = %q, want empty", page.ScriptURL)
+	}
+}
+
+// A page with neither a script tag nor PoW input is genuinely unsolvable, and
+// the caller must still be told so rather than proceeding with empty input.
+func TestParseCaptchaV2PageWithoutPowIsStillUsable(t *testing.T) {
+	page, err := parseCaptchaV2Page(`<html><body>nothing here</body></html>`)
+	if err != nil {
+		t.Fatalf("parse should not error on a bare page: %v", err)
+	}
+	if page.PowInput != "" {
+		t.Errorf("PowInput = %q, want empty so solveOnce rejects it", page.PowInput)
+	}
+}
+
+// debug_info has to be accepted by VK without reading the captcha bundle, and
+// the value the reference client uses is the SHA-256 of the empty string.
+func TestCaptchaV2DebugInfoFallback(t *testing.T) {
+	const wantEmptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if captchaV2DebugInfoFallback != wantEmptySHA256 {
+		t.Errorf("fallback = %q, want the SHA-256 of the empty string %q",
+			captchaV2DebugInfoFallback, wantEmptySHA256)
+	}
+}
+
+// The fingerprint, the cursor trail and the downlink series are cross-checked
+// by VK, so they have to describe the same browser.
+func TestCaptchaV2DeviceIsSelfConsistent(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		dev := captchaV2NewDevice()
+
+		var fp map[string]any
+		if err := json.Unmarshal([]byte(dev.json), &fp); err != nil {
+			t.Fatalf("fingerprint is not valid JSON: %v", err)
+		}
+		if got := fp["screenWidth"].(float64); int(got) != dev.width {
+			t.Fatalf("screenWidth %v disagrees with the device width %d", got, dev.width)
+		}
+		if fp["webdriver"] != false {
+			t.Error("webdriver must be false")
+		}
+		if _, ok := fp["connectionDownlink"]; !ok {
+			t.Error("fingerprint claims a connection but carries no downlink")
+		}
+
+		var pts []struct {
+			X int   `json:"x"`
+			Y int   `json:"y"`
+			T int64 `json:"t"`
+		}
+		if err := json.Unmarshal([]byte(dev.cursorTrail()), &pts); err != nil {
+			t.Fatalf("cursor trail is not valid JSON: %v", err)
+		}
+		if len(pts) < 4 {
+			t.Fatalf("cursor trail has %d points; an empty-ish trail is a bot signal", len(pts))
+		}
+		for j := 1; j < len(pts); j++ {
+			if pts[j].T < pts[j-1].T {
+				t.Fatalf("cursor timestamps go backwards at %d", j)
+			}
+			if dx := pts[j].X - pts[j-1].X; dx > 15 || dx < -15 {
+				t.Fatalf("cursor jumped %d px in one sample", dx)
+			}
+		}
+
+		var series []float64
+		if err := json.Unmarshal([]byte(dev.downlinkSeries()), &series); err != nil {
+			t.Fatalf("downlink series is not valid JSON: %v", err)
+		}
+		if len(series) == 0 {
+			t.Fatal("downlink series is empty")
+		}
+		for _, v := range series {
+			if v != dev.downlink {
+				t.Fatalf("downlink series %v contradicts the fingerprint's %v", v, dev.downlink)
+			}
+		}
+	}
+}
+
+// VK scores the pause before the click: 400 ms was answered with BOT.
+func TestCaptchaV2ClickDelayIsHumanScale(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		d := captchaV2ClickDelay()
+		if d < 1500*time.Millisecond || d > 2500*time.Millisecond {
+			t.Fatalf("click delay %v is outside the 1.5-2.5 s a human takes", d)
+		}
 	}
 }

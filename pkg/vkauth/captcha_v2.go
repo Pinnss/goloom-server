@@ -59,7 +59,24 @@ const (
 	captchaV2ScriptVersion = "1.1.1324"
 	captchaV2DefaultDevice = `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1080,"innerWidth":1920,"innerHeight":951,"devicePixelRatio":1,"language":"en-US","languages":["en-US","en"],"webdriver":false,"hardwareConcurrency":8,"notificationsPermission":"denied"}`
 	captchaV2MaxAttempts   = 2
+
+	// captchaV2ClickDelayMin/Jitter stand in for the pause between the widget
+	// mounting and a human actually clicking the checkbox. VK scores this: at
+	// 400 ms it answered BOT, and the reference client that passes VK today
+	// waits 1500-2500 ms. Shaving it is not worth a failed solve.
+	captchaV2ClickDelayMin    = 1500 * time.Millisecond
+	captchaV2ClickDelayJitter = 1000
 )
+
+// captchaV2DebugInfoFallback is what VK accepts for debug_info when we cannot
+// read the real value out of the captcha bundle: the SHA-256 of the empty
+// string. The reference client sends only this and is accepted, so the value is
+// evidently not checked against the script — which is what lets us solve a
+// challenge whose page no longer carries a <script> tag at all.
+var captchaV2DebugInfoFallback = func() string {
+	sum := sha256.Sum256(nil)
+	return hex.EncodeToString(sum[:])
+}()
 
 var (
 	reCaptchaV2PowInput   = regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
@@ -254,9 +271,15 @@ func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 
 	s.logf("page: showType=%q pow.diff=%d script=%s", page.ShowType, page.PowDifficulty, page.ScriptURL)
 
-	debugInfo, err := s.fetchDebugInfo(page.ScriptURL)
-	if err != nil {
-		return "", fmt.Errorf("fetch debug_info: %w (script_version=%s)", err, captchaV2ScriptVersion)
+	// Prefer the value the bundle carries; fall back to the constant VK accepts.
+	// Either way a missing or unreadable bundle is no longer fatal.
+	debugInfo := captchaV2DebugInfoFallback
+	if page.ScriptURL != "" {
+		if v, err := s.fetchDebugInfo(page.ScriptURL); err == nil {
+			debugInfo = v
+		} else {
+			s.logf("debug_info from bundle unavailable (%v); using the constant", err)
+		}
 	}
 
 	hash := solveCaptchaPoWV2(s.ctx, page.PowInput, page.PowDifficulty)
@@ -279,8 +302,10 @@ func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 		s.logf("browser_fp rotation: fresh random fp (attempt=%d savedConsecFails=%d)", attempt, s.saved.ConsecutiveFails)
 	}
 
-	if m := reCaptchaV2Version.FindStringSubmatch(page.ScriptURL); len(m) > 1 && m[1] != captchaV2ScriptVersion {
-		s.logf("script version drift: known=%s seen=%s (captcha_v2 may need update)", captchaV2ScriptVersion, m[1])
+	if page.ScriptURL != "" {
+		if m := reCaptchaV2Version.FindStringSubmatch(page.ScriptURL); len(m) > 1 && m[1] != captchaV2ScriptVersion {
+			s.logf("script version drift: known=%s seen=%s (captcha_v2 may need update)", captchaV2ScriptVersion, m[1])
+		}
 	}
 
 	endSession := func() {
@@ -308,8 +333,13 @@ func (s *captchaV2Session) solveOnce(attempt int) (string, error) {
 }
 
 func (s *captchaV2Session) solveCheckboxCaptcha(browserFP, hash, debugInfo string) (string, error) {
-	deviceJSON := captchaV2DefaultDevice
+	dev := captchaV2NewDevice()
+	deviceJSON := dev.json
 	if s.saved != nil && strings.TrimSpace(s.saved.DeviceJSON) != "" {
+		// A fingerprint captured from the real WebView beats a synthetic one;
+		// the cursor and downlink below stay consistent with the synthetic
+		// screen, which is the closest we can get without parsing the saved
+		// blob.
 		deviceJSON = s.saved.DeviceJSON
 	}
 	if _, err := s.captchaRequest("captchaNotRobot.componentDone", [][2]string{
@@ -327,10 +357,10 @@ func (s *captchaV2Session) solveCheckboxCaptcha(browserFP, hash, debugInfo strin
 	select {
 	case <-s.ctx.Done():
 		return "", s.ctx.Err()
-	case <-time.After(time.Duration(400+mathrand.Intn(250)) * time.Millisecond):
+	case <-time.After(captchaV2ClickDelay()):
 	}
 
-	check, err := s.performCaptchaCheck(browserFP, hash, "{}", "[]", debugInfo)
+	check, err := s.performCaptchaCheck(browserFP, hash, "{}", dev, debugInfo)
 	if err != nil {
 		return "", err
 	}
@@ -353,7 +383,7 @@ func (s *captchaV2Session) solveCheckboxCaptcha(browserFP, hash, debugInfo strin
 	return check.SuccessToken, nil
 }
 
-func (s *captchaV2Session) performCaptchaCheck(browserFP, hash, answerJSON, cursor, debugInfo string) (*captchaV2Check, error) {
+func (s *captchaV2Session) performCaptchaCheck(browserFP, hash, answerJSON string, dev captchaV2Device, debugInfo string) (*captchaV2Check, error) {
 	resp, err := s.captchaRequest("captchaNotRobot.check", [][2]string{
 		{"session_token", s.sessionToken},
 		{"domain", s.domain},
@@ -361,10 +391,10 @@ func (s *captchaV2Session) performCaptchaCheck(browserFP, hash, answerJSON, curs
 		{"accelerometer", "[]"},
 		{"gyroscope", "[]"},
 		{"motion", "[]"},
-		{"cursor", cursor},
+		{"cursor", dev.cursorTrail()},
 		{"taps", "[]"},
 		{"connectionRtt", "[]"},
-		{"connectionDownlink", "[]"},
+		{"connectionDownlink", dev.downlinkSeries()},
 		{"browser_fp", browserFP},
 		{"hash", hash},
 		{"answer", base64.StdEncoding.EncodeToString([]byte(answerJSON))},
@@ -475,6 +505,99 @@ func (s *captchaV2Session) logf(format string, args ...interface{}) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
+// captchaV2Device is one synthetic browser: the device fingerprint VK is given
+// at componentDone plus the telemetry derived from it at check time. The three
+// have to agree — a 1920x1080 screen with a cursor trail outside it, or a
+// declared downlink that the connectionDownlink series contradicts, is a
+// cheaper bot signal than sending nothing at all.
+type captchaV2Device struct {
+	json     string
+	width    int
+	height   int
+	downlink float64
+}
+
+// captchaV2NewDevice builds a plausible desktop browser. The static
+// fingerprint we used before carried no connection fields at all, which left
+// the check request declaring an empty connectionDownlink for a browser that
+// claimed a 4g connection.
+func captchaV2NewDevice() captchaV2Device {
+	resolutions := [][2]int{{1920, 1080}, {1366, 768}, {1440, 900}, {1536, 864}, {2560, 1440}}
+	res := resolutions[mathrand.Intn(len(resolutions))]
+	w, h := res[0], res[1]
+	downlink := 8.0 + mathrand.Float64()*4.0
+
+	dev := map[string]any{
+		"screenWidth":             w,
+		"screenHeight":            h,
+		"screenAvailWidth":        w,
+		"screenAvailHeight":       h - 40,
+		"innerWidth":              w - mathrand.Intn(100),
+		"innerHeight":             h - 100 - mathrand.Intn(50),
+		"devicePixelRatio":        []float64{1, 1.25, 1.5, 2}[mathrand.Intn(4)],
+		"language":                "en-US",
+		"languages":               []string{"en-US", "en"},
+		"webdriver":               false,
+		"hardwareConcurrency":     []int{4, 8, 12, 16}[mathrand.Intn(4)],
+		"deviceMemory":            []int{4, 8, 16, 32}[mathrand.Intn(4)],
+		"connectionEffectiveType": "4g",
+		"connectionRtt":           []int{50, 100, 150}[mathrand.Intn(3)],
+		"connectionDownlink":      downlink,
+		"notificationsPermission": "denied",
+	}
+	raw, err := json.Marshal(dev)
+	if err != nil {
+		// Marshalling a map of literals cannot fail; keep the old static value
+		// rather than returning an empty fingerprint.
+		return captchaV2Device{json: captchaV2DefaultDevice, width: 1920, height: 1080, downlink: downlink}
+	}
+	return captchaV2Device{json: string(raw), width: w, height: h, downlink: downlink}
+}
+
+// cursorTrail is the short drift of mouse samples a real click leaves behind.
+// We used to send "[]", i.e. a checkbox clicked by something with no pointer.
+func (d captchaV2Device) cursorTrail() string {
+	type point struct {
+		X int   `json:"x"`
+		Y int   `json:"y"`
+		T int64 `json:"t"`
+	}
+	x := d.width/2 + mathrand.Intn(200) - 100
+	y := d.height/2 + mathrand.Intn(200) - 100
+	t := time.Now().Add(-300 * time.Millisecond).UnixMilli()
+
+	pts := make([]point, 0, 8)
+	for i := 0; i < 4+mathrand.Intn(5); i++ {
+		pts = append(pts, point{X: x, Y: y, T: t + int64(i*20+mathrand.Intn(10))})
+		x += mathrand.Intn(30) - 15
+		y += mathrand.Intn(30) - 15
+	}
+	raw, err := json.Marshal(pts)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+// downlinkSeries is the connectionDownlink history the page would have sampled,
+// consistent with the figure in the fingerprint.
+func (d captchaV2Device) downlinkSeries() string {
+	vals := make([]float64, 7)
+	for i := range vals {
+		vals[i] = d.downlink
+	}
+	raw, err := json.Marshal(vals)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+// captchaV2ClickDelay is how long to wait before reporting the checkbox click.
+func captchaV2ClickDelay() time.Duration {
+	return captchaV2ClickDelayMin + time.Duration(mathrand.Intn(captchaV2ClickDelayJitter))*time.Millisecond
+}
+
 func parseCaptchaV2Page(html string) (*captchaV2Page, error) {
 	page := &captchaV2Page{}
 
@@ -490,10 +613,13 @@ func parseCaptchaV2Page(html string) (*captchaV2Page, error) {
 		}
 	}
 
+	// The script URL is optional. VK stopped emitting a matching <script> tag,
+	// and this used to return an error BEFORE the PoW input was read two lines
+	// below — so a perfectly solvable challenge was thrown away and every
+	// connect fell back to a manual WebView. The bundle only ever supplied
+	// debug_info, which has a working fallback.
 	if m := reCaptchaV2ScriptSrc.FindStringSubmatch(html); len(m) >= 2 {
 		page.ScriptURL = m[1]
-	} else {
-		return nil, errors.New("captcha script URL not found")
 	}
 
 	if m := reCaptchaV2PowInput.FindStringSubmatch(html); len(m) >= 2 {
