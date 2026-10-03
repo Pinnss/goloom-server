@@ -3,9 +3,11 @@ package wgclient
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +16,32 @@ import (
 
 // srtpHandshakeTimeout bounds one TURN allocate plus its DTLS-SRTP handshake.
 const srtpHandshakeTimeout = 15 * time.Second
+
+// ErrTURNQuota reports that VK refused an allocation because the credential is
+// already at its limit — STUN error 486, "Allocation Quota Reached". Measured
+// against VK in October 2026 the ceiling is 20 concurrent allocations per
+// credential: asking for 50 yields 20 up and 30 refused.
+//
+// It is worth a distinct error because retrying is pointless: the quota cannot
+// free up while our own allocations hold it, so every retry is a request VK
+// answers 486 — and VK throttles a credential that asks too often, which would
+// cost us the allocations we DO have.
+var ErrTURNQuota = errors.New("TURN allocation quota reached")
+
+// quotaErr wraps err with ErrTURNQuota when the response says the quota is
+// reached. pion surfaces this only in the message text, so matching on it is
+// the only option; both the numeric code and the reason phrase are checked so a
+// reworded reason or a renumbered code still leaves one working signal.
+func quotaErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "486") || strings.Contains(msg, "Allocation Quota Reached") {
+		return fmt.Errorf("%w: %v", ErrTURNQuota, err)
+	}
+	return err
+}
 
 // SRTPPool owns the TURN allocations behind an [SRTPBind]'s slots and can
 // rebuild any one of them on demand.
@@ -72,6 +100,14 @@ func NewSRTPPool(ctx context.Context, endpoints []string, peerAddr string, creds
 		c, err := p.dial(ctx, i)
 		if err != nil {
 			p.logf("srtp pool: slot %d/%d: %v", i+1, n, err)
+			// Every remaining slot would get the same 486, so stop asking: the
+			// rest of the fill is pure latency plus needless pressure on a
+			// credential VK is already throttling. n above the quota is not a
+			// misconfiguration — it is how you discover the quota.
+			if errors.Is(err, ErrTURNQuota) {
+				p.logf("srtp pool: VK quota reached at %d/%d allocations — not asking for the rest", up, n)
+				break
+			}
 			continue
 		}
 		conns[i] = c
@@ -114,7 +150,7 @@ func (p *SRTPPool) dial(ctx context.Context, idx int) (net.Conn, error) {
 
 	alloc, err := AllocateTURN(ctx, endpoint, peerAddr, creds)
 	if err != nil {
-		return nil, fmt.Errorf("TURN allocate via %s: %w", endpoint, err)
+		return nil, quotaErr(fmt.Errorf("TURN allocate via %s: %w", endpoint, err))
 	}
 	hsCtx, hsCancel := context.WithTimeout(ctx, srtpHandshakeTimeout)
 	conn, err := vkturnsrtp.Client(hsCtx, alloc.Relay(), alloc.PeerAddr())

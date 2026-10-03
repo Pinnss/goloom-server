@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -363,5 +365,86 @@ func TestBindOpenAfterShutdownFails(t *testing.T) {
 	}
 	if _, _, err := b.Open(0); err == nil {
 		t.Error("Open succeeded on a bind that was shut down")
+	}
+}
+
+// VK caps concurrent allocations per credential (20, measured against the live
+// service in October 2026). Every slot above that is born dead, and the
+// watchdog used to ask for all of them again every redialBackoff — ~30 doomed
+// allocate requests every 15 s, forever. VK throttles a credential that asks
+// too often, so the retries endangered the allocations that WERE up.
+func TestBindBacksOffHardWhenVKIsOutOfQuota(t *testing.T) {
+	b := NewSRTPBind([]net.Conn{nil})
+	defer b.Shutdown()
+
+	var calls atomic.Int64
+	b.Redial = func(context.Context, int) (net.Conn, error) {
+		calls.Add(1)
+		return nil, fmt.Errorf("TURN allocate via relay: %w", ErrTURNQuota)
+	}
+	b.dead[0].Store(true)
+
+	now := time.Now().Unix()
+	b.tryRedial(0, now)
+	if calls.Load() != 1 {
+		t.Fatalf("Redial called %d times, want 1", calls.Load())
+	}
+
+	// A slot refused for quota must stay quiet well past the ordinary backoff.
+	b.tryRedial(0, now+int64(redialBackoff/time.Second)+1)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Redial called %d times one ordinary backoff later; a quota refusal must hold much longer", got)
+	}
+	b.tryRedial(0, now+int64(quotaRedialBackoff/time.Second)+1)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("Redial called %d times after the quota backoff elapsed, want 2", got)
+	}
+}
+
+// A non-quota failure keeps the ordinary, eager backoff: those are transient
+// and the slot should come back quickly.
+func TestBindKeepsShortBackoffForOrdinaryFailures(t *testing.T) {
+	b := NewSRTPBind([]net.Conn{nil})
+	defer b.Shutdown()
+
+	var calls atomic.Int64
+	b.Redial = func(context.Context, int) (net.Conn, error) {
+		calls.Add(1)
+		return nil, errors.New("TURN allocate via relay: connection reset")
+	}
+	b.dead[0].Store(true)
+
+	now := time.Now().Unix()
+	b.tryRedial(0, now)
+	b.tryRedial(0, now+int64(redialBackoff/time.Second)+1)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("Redial called %d times across two ordinary backoffs, want 2", got)
+	}
+}
+
+// quotaErr must recognise a refusal from the message text pion gives us — by
+// code and by reason phrase — and must not mislabel anything else.
+func TestQuotaErrClassification(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		quota bool
+	}{
+		{"pion wording", errors.New("turn Allocate: Allocate error response (error 486: Allocation Quota Reached)"), true},
+		{"code only", errors.New("stun error 486"), true},
+		{"reason only", errors.New("Allocation Quota Reached"), true},
+		{"unrelated", errors.New("dial udp: i/o timeout"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := quotaErr(tc.err)
+			if errors.Is(got, ErrTURNQuota) != tc.quota {
+				t.Errorf("quotaErr(%v) quota=%v, want %v", tc.err, !tc.quota, tc.quota)
+			}
+			if tc.err != nil && !strings.Contains(got.Error(), tc.err.Error()) {
+				t.Errorf("quotaErr dropped the original message: %v", got)
+			}
+		})
 	}
 }

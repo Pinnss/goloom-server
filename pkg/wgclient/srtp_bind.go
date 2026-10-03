@@ -109,6 +109,7 @@ type SRTPBind struct {
 	pingSeq      []atomic.Uint64
 	dead         []atomic.Bool
 	serverProbed atomic.Bool // any pong ever seen → probes are armed
+	quotaLogged  atomic.Bool // say "out of quota" once, not per slot per cycle
 
 	// nextRedialUnix[i] throttles slot i's replacement attempts, so a VK-side
 	// outage cannot turn into an allocate storm.
@@ -148,6 +149,14 @@ const (
 	// shutdownGrace bounds how long teardown waits for the bind's goroutines.
 	// It exists because a TURN allocate ignores context cancellation.
 	shutdownGrace = 2 * time.Second
+
+	// quotaRedialBackoff throttles a slot VK refused for want of quota. The
+	// ordinary backoff is far too eager for that: with numConnections set above
+	// VK's per-credential ceiling (20, measured) every surplus slot is born
+	// dead, so the watchdog asked for ~30 doomed allocations every 15 s,
+	// forever. VK throttles a credential that asks too often, which puts the
+	// allocations we DO hold at risk.
+	quotaRedialBackoff = 10 * time.Minute
 )
 
 var probePingMagic = []byte{0xff, 'P', 'N', 'G'}
@@ -465,6 +474,15 @@ func (b *SRTPBind) tryRedial(idx int, nowUnix int64) {
 	// b.ctx is cancelled by Close, which aborts the dial instead of waiting.
 	nc, err := b.Redial(b.ctx, idx)
 	if err != nil {
+		if errors.Is(err, ErrTURNQuota) {
+			// Nothing changes until one of our own allocations goes away, so
+			// stop asking for a while instead of every redialBackoff.
+			b.nextRedialUnix[idx].Store(nowUnix + int64(quotaRedialBackoff/time.Second))
+			if b.logger != nil && !b.quotaLogged.Swap(true) {
+				b.logger.Printf("srtp-bind: VK is out of allocation quota; surplus slots paused for %s", quotaRedialBackoff)
+			}
+			return
+		}
 		if b.logger != nil {
 			b.logger.Printf("srtp-bind: conn %d redial failed: %v", idx, err)
 		}
