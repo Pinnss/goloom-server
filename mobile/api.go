@@ -611,6 +611,13 @@ func (c *Client) Disconnect() {
 	// Также гасим embedded wg-userspace, если он был поднят native-стороной
 	// через AdoptTun.
 	disconnectEmbedded(c.logger)
+	// The device's own Close only stops the bind's receive side — wireguard-go
+	// cycles Close/Open on every bring-up, so the bind cannot treat that as
+	// teardown. Releasing the SRTP conns is ours to do, and it must happen
+	// after the device is down so nothing is still writing to them.
+	if bind := c.srtpBind.Swap(nil); bind != nil {
+		_ = bind.Shutdown()
+	}
 }
 
 // IsConnected returns whether the relay goroutine is still alive.

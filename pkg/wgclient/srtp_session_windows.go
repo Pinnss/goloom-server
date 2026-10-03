@@ -131,12 +131,22 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		if poolOwned {
 			pool.Close()
 			for _, c := range srtpConns {
-				_ = c.Close()
+				if c != nil {
+					_ = c.Close()
+				}
 			}
 		}
 	}()
-	if len(srtpConns) < numConns {
-		lg.Printf("vk-turn-srtp: only %d/%d conns survived setup — the bind watchdog will keep filling the rest", len(srtpConns), numConns)
+	up := 0
+	for _, c := range srtpConns {
+		if c != nil {
+			up++
+		}
+	}
+	if up < numConns {
+		// The failed slots keep their index and start dead, so the bind's
+		// watchdog redials exactly those — the pool can still reach numConns.
+		lg.Printf("vk-turn-srtp: %d/%d conns up at setup — the watchdog will keep retrying the rest", up, numConns)
 	}
 
 	// ── 4. Wintun + wireguard-go bound to the SRTP conn ─────────────
@@ -161,9 +171,15 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 
 	bind := NewSRTPBind(srtpConns)
 	bind.SetLogger(lg)
+	// Registered first so it runs LAST: every wgDev.Close() below — deferred or
+	// explicit — only stops the bind's receive side, because wireguard-go cycles
+	// Close/Open on each bring-up. The conns are released here, once the device
+	// is already down.
+	defer func() { _ = bind.Shutdown() }()
 	// Dead allocations are rebuilt instead of only retired, so the pool cannot
 	// silently shrink to nothing over a long session.
 	bind.Redial = pool.Redial
+	bind.GroupHello = pool.GroupHello()
 	wgLogger := &device.Logger{
 		Verbosef: func(format string, args ...any) { lg.Printf("WG-USERSPACE: "+format, args...) },
 		Errorf:   func(format string, args ...any) { lg.Printf("WARN WG-USERSPACE: "+format, args...) },

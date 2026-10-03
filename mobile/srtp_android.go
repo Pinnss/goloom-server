@@ -30,7 +30,6 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/Pinnss/goloom-server/internal/identity"
-	"github.com/Pinnss/goloom-server/internal/relay/vkturnsrtp"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/pkg/wgclient"
 )
@@ -38,17 +37,17 @@ import (
 // ConnectVKTurnSRTP is the mobile entry point for the vk-turn-srtp
 // transport. Drives the full flow:
 //
-//   1. Decode a vkturnproxy:// link.
-//   2. Anonymous-join VK auth ladder (reusing vkcalls.DoAuth + the
-//      BrowserLauncher captcha solver from mobile/vk.go).
-//   3. Open Config.VKTurnSRTP.NumConnections parallel TURN
-//      allocations against the VK TURN nodes; DTLS-SRTP handshake
-//      through each.
-//   4. Adopt the supplied TUN file descriptor (already configured
-//      with address/routes/MTU by VpnService.Builder on the Java
-//      side) and start wireguard-go bound to a SRTPBind over the
-//      pool of SRTP-wrapped conns.
-//   5. Return a ConnectResult JSON for the UI.
+//  1. Decode a vkturnproxy:// link.
+//  2. Anonymous-join VK auth ladder (reusing vkcalls.DoAuth + the
+//     BrowserLauncher captcha solver from mobile/vk.go).
+//  3. Open Config.VKTurnSRTP.NumConnections parallel TURN
+//     allocations against the VK TURN nodes; DTLS-SRTP handshake
+//     through each.
+//  4. Adopt the supplied TUN file descriptor (already configured
+//     with address/routes/MTU by VpnService.Builder on the Java
+//     side) and start wireguard-go bound to a SRTPBind over the
+//     pool of SRTP-wrapped conns.
+//  5. Return a ConnectResult JSON for the UI.
 //
 // tunFd must come from VpnService.Builder.establish().detachFd() —
 // Go takes ownership and closes it on Disconnect.
@@ -163,8 +162,20 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 		c.emitPhase("error", err.Error())
 		return "", err
 	}
-	if len(srtpConns) < numConns {
-		c.logger.Printf("vk-turn-srtp: %d/%d conns up; continuing with reduced parallelism", len(srtpConns), numConns)
+	// Count real conns, not slots. The pool returns EXACTLY numConns entries with
+	// nil where an allocate failed — that index alignment is what lets a redial
+	// rebuild the right slot — so len() is always numConns and comparing it was
+	// dead code. Worse, reporting it as the allocation count told the user
+	// "10 allocs up" when three were up, which is the same lie as declaring a
+	// dead tunnel ready.
+	allocsUp := 0
+	for _, sc := range srtpConns {
+		if sc != nil {
+			allocsUp++
+		}
+	}
+	if allocsUp < numConns {
+		c.logger.Printf("vk-turn-srtp: %d/%d conns up; continuing with reduced parallelism", allocsUp, numConns)
 	}
 
 	// ── adopt TUN fd + bring wireguard-go up over the SRTP pool ────
@@ -172,11 +183,13 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 	if err := adoptTUNWithSRTPBind(c, tunFd, srtpConns, cfg.WG, pool); err != nil {
 		cancel()
 		for _, conn := range srtpConns {
-			_ = conn.Close()
+			if conn != nil {
+				_ = conn.Close()
+			}
 		}
-		for _, a := range allocs {
-			a.Close()
-		}
+		// Release the TURN allocations too: without this every failed adopt
+		// leaked all N of them, and VK answers 486 past ten per credential.
+		pool.Close()
 		typed := mobileErr(ErrSessionSetup, fmt.Errorf("wg adopt: %w", err))
 		c.recordErr(typed)
 		c.emitPhase("error", typed.Error())
@@ -193,7 +206,7 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 	}()
 
 	c.running.Store(true)
-	c.emitPhase("ready", fmt.Sprintf("%d allocs up", len(srtpConns)))
+	c.emitPhase("ready", fmt.Sprintf("%d allocs up", allocsUp))
 
 	res := ConnectResult{
 		DisplayName:    displayName,
@@ -241,8 +254,19 @@ func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclien
 	if pool != nil {
 		// Let the bind's watchdog rebuild a slot instead of only retiring it.
 		bind.Redial = pool.Redial
+		bind.GroupHello = pool.GroupHello()
 	}
 	c.srtpBind.Store(bind)
+	// Every failure below returns with the conns still open, because the bind —
+	// not dev.Close() — owns them now. Release them on the way out unless the
+	// adopt actually succeeded.
+	adopted := false
+	defer func() {
+		if !adopted {
+			_ = bind.Shutdown()
+			c.srtpBind.Store(nil)
+		}
+	}()
 	dev := device.NewDevice(tunDev, bind, logger)
 
 	privHex, err := keyB64ToHex(wg.ClientPrivateKey)
@@ -289,8 +313,22 @@ func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclien
 
 	embedded.dev = dev
 	embedded.tunDev = tunDev
-	c.logger.Printf("vk-turn-srtp: wg-userspace adopted tun '%s' fd=%d (pool=%d)", name, tunFd, len(srtpConns))
+	adopted = true
+	c.logger.Printf("vk-turn-srtp: wg-userspace adopted tun '%s' fd=%d (pool=%d/%d)",
+		name, tunFd, connsUp(srtpConns), len(srtpConns))
 	return nil
+}
+
+// connsUp counts the slots that actually hold a conn; the rest are nil
+// placeholders keeping slot indices aligned with the pool's.
+func connsUp(conns []net.Conn) int {
+	n := 0
+	for _, c := range conns {
+		if c != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // parseShortIDFromVKLink extracts the call short id from

@@ -42,9 +42,30 @@ import (
 
 // SRTPBind implements [conn.Bind] over one-or-many SRTP-wrapped conns.
 type SRTPBind struct {
-	mu     sync.Mutex
-	open   bool
+	// ctx is cancelled by Close so an in-flight Redial aborts.
+	ctx       context.Context
+	cancelCtx context.CancelFunc
+
+	mu      sync.Mutex
+	open    bool
+	closing bool // set under mu before Shutdown waits, so tryRedial stops adding
+	started bool // reader/probe/watchdog goroutines have been spawned
+
+	// closed signals PERMANENT shutdown and is closed only by Shutdown. Every
+	// long-lived goroutine (readers, probes, watchdog) keys off it, so they
+	// survive the Close/Open cycling that wireguard-go does below.
 	closed chan struct{}
+
+	// stopRecv unblocks the CURRENT Open's ReceiveFunc and is replaced on each
+	// Open. It exists because conn.Bind.Close does not mean "tear everything
+	// down": device.Up() runs BindUpdate, which calls bind.Close() and then
+	// bind.Open() on the way up. Close used to close the SRTP conns outright,
+	// so every allocation died ~14 ms before the first handshake and the
+	// tunnel reported "ready" while being unable to send a single byte. The
+	// conns are owned by the caller's pool and cannot be rebuilt synchronously
+	// inside Open, so Close now only stops the receive side; Shutdown is what
+	// releases the conns.
+	stopRecv chan struct{}
 
 	// One slot per TURN allocation, read atomically: a slot's conn can be
 	// swapped out by the watchdog while Send is running. Owned — Close()
@@ -56,7 +77,17 @@ type SRTPBind struct {
 	// stays dead for the life of the session, which is how the tunnel used to
 	// rot: allocations died one by one and nothing replaced them, so the pool
 	// silently shrank to zero while the UI still said "On".
-	Redial func(idx int) (net.Conn, error)
+	// The context is cancelled when the bind closes, so a teardown aborts a
+	// TURN allocate plus DTLS handshake in progress instead of waiting out its
+	// ~20 s budget.
+	Redial func(ctx context.Context, idx int) (net.Conn, error)
+
+	// GroupHello, when set, is re-sent on every conn alongside each liveness
+	// probe. The server treats a repeat of the same id as a no-op, so this is
+	// free insurance: the hello is a single datagram over a lossy relay, and
+	// losing it silently leaves that allocation ungrouped — which quietly
+	// restores the endpoint roaming the grouping exists to prevent.
+	GroupHello []byte
 
 	logger *log.Logger // optional; nil disables probe-loop logging
 
@@ -113,6 +144,10 @@ const (
 	// outage cannot turn into an allocate storm (VK rate-limits allocates and
 	// answers 486 past 10 per credential).
 	redialBackoff = 15 * time.Second
+
+	// shutdownGrace bounds how long teardown waits for the bind's goroutines.
+	// It exists because a TURN allocate ignores context cancellation.
+	shutdownGrace = 2 * time.Second
 )
 
 var probePingMagic = []byte{0xff, 'P', 'N', 'G'}
@@ -160,7 +195,10 @@ func NewSRTPBind(conns []net.Conn) *SRTPBind {
 	if len(conns) == 0 {
 		conns = nil
 	}
+	ctx, cancelCtx := context.WithCancel(context.Background())
 	b := &SRTPBind{
+		ctx:            ctx,
+		cancelCtx:      cancelCtx,
 		closed:         make(chan struct{}),
 		rxCh:           make(chan rxPacket, srtpBindRxBufSize),
 		slots:          make([]atomic.Pointer[connBox], len(conns)),
@@ -170,6 +208,13 @@ func NewSRTPBind(conns []net.Conn) *SRTPBind {
 		nextRedialUnix: make([]atomic.Int64, len(conns)),
 	}
 	for i, c := range conns {
+		if c == nil {
+			// A slot the pool could not establish. It keeps its index — the
+			// bind and the pool must agree on what slot i means — and starts
+			// dead so the watchdog redials it instead of Send picking it.
+			b.dead[i].Store(true)
+			continue
+		}
 		b.slots[i].Store(&connBox{c: c})
 	}
 	return b
@@ -193,7 +238,17 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if len(b.slots) == 0 {
 		return nil, 0, errors.New("SRTPBind: no SRTP conns")
 	}
+	select {
+	case <-b.closed:
+		// Shut down for good: every slot is empty and rxCh is closed, so an
+		// "Open" here would hand wireguard-go a bind that reports ready and
+		// cannot move a byte — exactly the failure this split exists to end.
+		return nil, 0, net.ErrClosed
+	default:
+	}
 	b.open = true
+	b.stopRecv = make(chan struct{})
+	stop := b.stopRecv
 
 	// Reader + probe goroutines per conn. Reader allocates its own buf
 	// to avoid concurrent writes; probe sender uses a tiny dedicated
@@ -210,6 +265,7 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 		}
 		b.rxWG.Add(1)
 		go b.zombieWatchdog()
+		b.started = true
 	})
 
 	recv := func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
@@ -226,6 +282,8 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 			sizes[0] = n
 			eps[0] = srtpEndpoint{}
 			return 1, nil
+		case <-stop:
+			return 0, net.ErrClosed
 		case <-b.closed:
 			return 0, net.ErrClosed
 		}
@@ -238,6 +296,9 @@ func (b *SRTPBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
 // goes to the fan-in channel.
 func (b *SRTPBind) readerLoop(idx int, c net.Conn) {
 	defer b.rxWG.Done()
+	// A replaced conn's reader ends when its conn is closed, which tryRedial
+	// does — no generation check is needed here, but the slot must never be
+	// judged by this conn again.
 	buf := make([]byte, 2048)
 	for {
 		n, err := c.Read(buf)
@@ -289,8 +350,21 @@ func (b *SRTPBind) probeSenderLoop(idx int, c net.Conn) {
 		case <-b.closed:
 			return
 		case <-t.C:
+			// Stop as soon as this conn is no longer the slot's: the loop used
+			// to keep probing a replaced conn, whose writes then failed and
+			// condemned the healthy successor — the slot flapped forever and
+			// burned a fresh VK allocation every cycle.
+			if cur := b.slots[idx].Load(); cur == nil || cur.c != c {
+				return
+			}
 			if b.dead[idx].Load() {
 				return
+			}
+			if hello := b.GroupHello; len(hello) > 0 {
+				if _, err := c.Write(hello); err != nil {
+					// Fall through: the probe write below reports the failure.
+					_ = err
+				}
 			}
 			seq := b.pingSeq[idx].Add(1)
 			binary.BigEndian.PutUint64(pkt[len(probePingMagic):], seq)
@@ -330,14 +404,21 @@ func (b *SRTPBind) zombieWatchdog() {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if !b.serverProbed.Load() {
-				continue
-			}
+			// The serverProbed gate guards the stale-pong heuristic ONLY. It used
+			// to skip the whole loop, so a slot that was dead from the start —
+			// which the pool now reports as a nil conn whenever an allocate
+			// fails — could never be rebuilt unless some OTHER slot happened to
+			// pong first. With every slot born dead, nothing ever healed.
+			probed := b.serverProbed.Load()
 			now := time.Now().Unix()
 			alive := 0
 			for i := range b.slots {
-				if b.dead[i].Load() {
+				if b.dead[i].Load() || b.slots[i].Load() == nil {
 					b.tryRedial(i, now)
+					continue
+				}
+				if !probed {
+					alive++
 					continue
 				}
 				last := b.lastPongUnix[i].Load()
@@ -380,27 +461,34 @@ func (b *SRTPBind) tryRedial(idx int, nowUnix int64) {
 	}
 	b.nextRedialUnix[idx].Store(nowUnix + int64(redialBackoff/time.Second))
 
-	nc, err := b.Redial(idx)
+	// Dial OUTSIDE b.mu: it can take ~20 s, and Close must not queue behind it.
+	// b.ctx is cancelled by Close, which aborts the dial instead of waiting.
+	nc, err := b.Redial(b.ctx, idx)
 	if err != nil {
 		if b.logger != nil {
 			b.logger.Printf("srtp-bind: conn %d redial failed: %v", idx, err)
 		}
 		return
 	}
-	// Losing the race with Close must not leak the fresh conn.
-	select {
-	case <-b.closed:
+
+	// Install under b.mu so the goroutine bookkeeping cannot race Close's
+	// rxWG.Wait: an Add after Wait started is a WaitGroup misuse panic, and an
+	// Add that sneaks in just before it deadlocks the teardown.
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
 		_ = nc.Close()
 		return
-	default:
 	}
 	old := b.slots[idx].Swap(&connBox{c: nc})
-	if old != nil {
-		_ = old.c.Close()
-	}
 	b.lastPongUnix[idx].Store(nowUnix)
 	b.dead[idx].Store(false)
 	b.rxWG.Add(2)
+	b.mu.Unlock()
+
+	if old != nil {
+		_ = old.c.Close()
+	}
 	go b.readerLoop(idx, nc)
 	go b.probeSenderLoop(idx, nc)
 	if b.logger != nil {
@@ -408,22 +496,53 @@ func (b *SRTPBind) tryRedial(idx int, nowUnix int64) {
 	}
 }
 
+// Close implements the [conn.Bind] half of the lifecycle: it stops the current
+// receive side and nothing else. wireguard-go calls it on the way UP as well as
+// down — device.Up() runs BindUpdate, which closes the bind and immediately
+// reopens it — so closing the SRTP conns here killed every TURN allocation
+// before the first handshake could use it. Releasing the conns is [Shutdown]'s
+// job, and the owner calls that when the tunnel really goes away.
+//
+// It always reports success: BindUpdate aborts the whole bring-up if Close
+// returns an error, and a failure to shut down a receive path is never a reason
+// to refuse to start.
 func (b *SRTPBind) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Close is independent of Open on purpose. A bind that was constructed but
-	// never opened — which happens on every setup path that fails between
-	// NewSRTPBind and wireguard-go bringing the device up — used to return here
-	// without closing its conns or signalling b.closed, so the conns leaked and
-	// a late redial could still repopulate a slot.
+	b.open = false
+	closeOnce(b.stopRecv)
+	return nil
+}
+
+// Shutdown releases everything the bind owns: it signals permanent shutdown,
+// aborts a Redial in flight, closes every SRTP conn, waits for the reader,
+// probe and watchdog goroutines to exit, and closes the fan-in channel. The
+// bind is unusable afterwards.
+//
+// It is independent of Open on purpose. A bind that was constructed but never
+// opened — which happens on every setup path that fails between NewSRTPBind and
+// wireguard-go bringing the device up — must still release its conns, or the
+// TURN allocations behind them leak and VK answers 486 past ten per credential.
+func (b *SRTPBind) Shutdown() error {
+	b.mu.Lock()
 	select {
 	case <-b.closed:
-		return nil // already closed
+		b.mu.Unlock()
+		return nil // already shut down
 	default:
 		close(b.closed)
 	}
-	wasOpen := b.open
+	// Unblock the receive side too: a reader parked on the fan-in channel
+	// leaves via b.closed, but wireguard-go may still be inside recv.
+	closeOnce(b.stopRecv)
+	started := b.started
 	b.open = false
+	b.closing = true
+	// cancelCtx only reaches the socket dial: pion's client.Listen/Allocate
+	// take no context (see srtp_turn.go), so a redial past that point runs to
+	// completion regardless. The bounded wait below is what keeps teardown
+	// from hanging on it.
+	b.cancelCtx()
 	var firstErr error
 	for i := range b.slots {
 		box := b.slots[i].Swap(nil)
@@ -434,11 +553,50 @@ func (b *SRTPBind) Close() error {
 			firstErr = err
 		}
 	}
-	if wasOpen {
-		b.rxWG.Wait()
+	b.mu.Unlock()
+
+	// Wait with b.mu RELEASED. tryRedial dials outside the lock and then takes
+	// it to install the conn, and the goroutine driving it is the watchdog —
+	// which rxWG counts. Waiting for that goroutine while holding the lock it
+	// needs deadlocks teardown, and cancelCtx does not save us once the dial
+	// has already returned a conn. Releasing first is safe because b.closing is
+	// set: a redial landing now closes its conn and adds nothing to rxWG.
+	//
+	// Wait only if goroutines were ever spawned; b.closed is already closed, so
+	// a reader parked on a full rxCh takes that branch instead of wedging us.
+	if started {
+		done := make(chan struct{})
+		go func() { b.rxWG.Wait(); close(done) }()
+		select {
+		case <-done:
+			close(b.rxCh)
+		case <-time.After(shutdownGrace):
+			// A TURN allocate cannot be cancelled, so a redial in flight holds
+			// its goroutine for the full budget. Returning without closing rxCh
+			// leaves it to the GC — nothing writes to a closed channel, and the
+			// alternative is Disconnect freezing the UI on the network.
+			if b.logger != nil {
+				b.logger.Printf("srtp-bind: teardown left a dial in flight after %s", shutdownGrace)
+			}
+		}
+	} else {
+		close(b.rxCh)
 	}
-	close(b.rxCh)
 	return firstErr
+}
+
+// closeOnce closes ch unless it is nil or already closed. Open has not
+// necessarily run — BindUpdate's very first act on device.Up() is to call
+// Close — so a nil channel is the normal case, not an error.
+func closeOnce(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 func (b *SRTPBind) SetMark(uint32) error { return nil }
@@ -469,7 +627,12 @@ func (b *SRTPBind) Send(bufs [][]byte, _ conn.Endpoint) error {
 				continue
 			}
 			if _, err := box.c.Write(buf); err != nil {
-				b.dead[idx].Store(true)
+				// Only retire the slot if it still holds the conn that failed:
+				// a replacement may already have been installed, and marking
+				// THAT dead would undo the repair.
+				if b.slots[idx].Load() == box {
+					b.dead[idx].Store(true)
+				}
 				lastErr = err
 				continue
 			}
