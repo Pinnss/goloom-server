@@ -30,27 +30,41 @@ func TestDeadlineReusesOneTimer(t *testing.T) {
 	}
 }
 
-// Pushing the deadline forward must also keep it from firing: a stale wakeup
-// from the previous, shorter deadline must not expire the new one.
-func TestDeadlineExtensionSuppressesStaleFire(t *testing.T) {
+// A superseded timer can still run: Timer.Stop cannot cancel a callback that
+// has already been scheduled. fire() must then notice the deadline moved and do
+// nothing. The interleaving cannot be forced through set() alone — Reset wins
+// the race in practice — so this calls fire() directly, which is exactly what a
+// late callback does.
+func TestDeadlineStaleFireIsIgnored(t *testing.T) {
+	var d deadline
+	defer d.stop()
+	d.set(time.Now().Add(10 * time.Second))
+	current := d.wait()
+
+	d.fire() // a leftover callback from some earlier, shorter deadline
+
+	if d.expired() {
+		t.Fatal("stale fire expired a deadline that is 10 s away")
+	}
+	if isClosed(current) {
+		t.Fatal("stale fire closed the current deadline channel")
+	}
+}
+
+// Extending a deadline releases the old channel (callers re-read wait()) but
+// must leave the new one open and unexpired.
+func TestDeadlineExtensionKeepsNewDeadlineLive(t *testing.T) {
 	var d deadline
 	defer d.stop()
 	d.set(time.Now().Add(20 * time.Millisecond))
-	ch := d.wait()
 	d.set(time.Now().Add(10 * time.Second))
-
-	select {
-	case <-ch:
-		// The channel from before the extension is released on purpose —
-		// callers re-read wait() — so this is fine. What must NOT happen is
-		// the NEW deadline reading as expired.
-	case <-time.After(60 * time.Millisecond):
-	}
+	current := d.wait()
+	time.Sleep(120 * time.Millisecond) // past the old deadline
 	if d.expired() {
-		t.Fatal("extended deadline reported as expired after the old timer fired")
+		t.Fatal("extended deadline reported as expired")
 	}
-	if got := d.wait(); isClosed(got) {
-		t.Fatal("current deadline channel closed by a stale fire")
+	if isClosed(current) {
+		t.Fatal("current deadline channel closed after the extension")
 	}
 }
 

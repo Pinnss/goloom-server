@@ -2,6 +2,7 @@ package wgclient
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net"
@@ -25,6 +26,13 @@ const srtpHandshakeTimeout = 15 * time.Second
 // Pool.Redial into SRTPBind.Redial lets the watchdog heal instead of only
 // diagnose.
 type SRTPPool struct {
+	// groupID ties every conn in this pool together for the server, which then
+	// feeds them all from ONE socket to WireGuard and spreads the downlink
+	// across them. Without it the kernel roams the peer endpoint to whichever
+	// allocation spoke last, so the whole downlink rides a single one at VK's
+	// ~247 KiB/s per-allocation budget. See internal/relay/vkturnsrtp/group.go.
+	groupID [16]byte
+
 	endpoints []string
 	peerAddr  string
 	creds     TURNCreds
@@ -35,11 +43,12 @@ type SRTPPool struct {
 	closed bool
 }
 
-// NewSRTPPool allocates up to n slots, round-robining over endpoints. It
-// returns the pool, the conns that came up (in slot order) and an error only
-// when NOT A SINGLE slot could be established. Partial success is normal and
-// the caller should carry on with fewer conns; once Redial is wired in, the
-// bind's watchdog fills the gaps.
+// NewSRTPPool allocates n slots, round-robining over endpoints. It returns the
+// pool and a slice of EXACTLY n conns, nil where a slot failed, so slot indices
+// line up with the bind's — a redial for index i must rebuild the same
+// allocation the bind thinks lives at i, and a compacted slice would silently
+// shift them and tear down a healthy one. It errors only when NOT A SINGLE slot
+// came up; partial success is normal and the bind's watchdog fills the nil gaps.
 func NewSRTPPool(ctx context.Context, endpoints []string, peerAddr string, creds TURNCreds, n int, lg *log.Logger) (*SRTPPool, []net.Conn, error) {
 	if len(endpoints) == 0 {
 		return nil, nil, fmt.Errorf("srtp pool: no TURN endpoints")
@@ -54,27 +63,38 @@ func NewSRTPPool(ctx context.Context, endpoints []string, peerAddr string, creds
 		logger:    lg,
 		allocs:    make([]*TURNAllocation, n),
 	}
-	conns := make([]net.Conn, 0, n)
+	if _, err := rand.Read(p.groupID[:]); err != nil {
+		return nil, nil, fmt.Errorf("srtp pool: group id: %w", err)
+	}
+	conns := make([]net.Conn, n)
+	up := 0
 	for i := 0; i < n; i++ {
 		c, err := p.dial(ctx, i)
 		if err != nil {
 			p.logf("srtp pool: slot %d/%d: %v", i+1, n, err)
 			continue
 		}
-		conns = append(conns, c)
+		conns[i] = c
+		up++
 	}
-	if len(conns) == 0 {
+	if up == 0 {
 		p.Close()
 		return nil, nil, fmt.Errorf("srtp pool: every TURN allocate / DTLS handshake failed")
 	}
 	return p, conns, nil
 }
 
-// Redial rebuilds one slot. Suitable as [SRTPBind.Redial].
-func (p *SRTPPool) Redial(idx int) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), srtpHandshakeTimeout)
+// GroupHello is the hello every conn in this pool announces, for
+// [SRTPBind.GroupHello] to repeat.
+func (p *SRTPPool) GroupHello() []byte { return vkturnsrtp.GroupHello(p.groupID) }
+
+// Redial rebuilds one slot. Suitable as [SRTPBind.Redial]. The context lets a
+// teardown abort a dial in progress — a TURN allocate plus DTLS handshake can
+// take the better part of 20 s, and Close used to wait it out.
+func (p *SRTPPool) Redial(ctx context.Context, idx int) (net.Conn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, srtpHandshakeTimeout)
 	defer cancel()
-	return p.dial(ctx, idx)
+	return p.dial(dialCtx, idx)
 }
 
 // dial establishes slot idx, replacing whatever allocation it held.
@@ -117,7 +137,17 @@ func (p *SRTPPool) dial(ctx context.Context, idx int) (net.Conn, error) {
 	if old != nil {
 		old.Close()
 	}
-	p.logf("srtp pool: slot %d up via %s", idx, endpoint)
+
+	// Announce the group before any WireGuard traffic, and again on every
+	// replacement conn, so a rebuilt slot rejoins the same shared socket instead
+	// of splitting the peer endpoint off on its own.
+	if err := conn.SetWriteDeadline(time.Now().Add(srtpHandshakeTimeout)); err == nil {
+		if _, err := conn.Write(vkturnsrtp.GroupHello(p.groupID)); err != nil {
+			p.logf("srtp pool: slot %d group hello: %v", idx, err)
+		}
+		_ = conn.SetWriteDeadline(time.Time{})
+	}
+	p.logf("srtp pool: slot %d up via %s (group %x)", idx, endpoint, p.groupID[:4])
 	return conn, nil
 }
 

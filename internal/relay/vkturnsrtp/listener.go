@@ -1,13 +1,14 @@
 // SRTP-framed listener implementing [relay.Handle]. Each accepted
 // session arrives as a [net.Conn] from the srtp.go demux+handshake
-// machinery; this file dials the local WG endpoint and pumps bytes
-// in both directions, plus echoes liveness-probe sentinels back to
-// the client (parity with anton48 server pumpBidirectional).
+// machinery; this file pumps bytes between each SRTP conn and the
+// WireGuard socket its group shares (see group.go), echoes
+// liveness-probe sentinels back to the client, and gates group hellos.
 
 package vkturnsrtp
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,10 @@ type listener struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// groups maps a client's group id to the shared WireGuard socket its
+	// allocations feed. See group.go for why one socket per client matters.
+	groups *groupRegistry
 
 	active        atomic.Uint64
 	totalAccepted atomic.Uint64
@@ -69,6 +74,7 @@ func newListener(setupCtx context.Context, cfg relay.Config) (*listener, error) 
 		srv:    srv,
 		ctx:    runCtx,
 		cancel: cancel,
+		groups: newGroupRegistry(),
 	}
 
 	l.wg.Add(1)
@@ -135,27 +141,8 @@ const (
 // verbatim rather than being forwarded to WG. Without this echo
 // the client's zombie-detection (post-iOS-wake) stays dormant.
 func (l *listener) forwardUDP(conn net.Conn) {
-	serverConn, err := net.Dial("udp", l.cfg.ConnectAddr)
-	if err != nil {
-		l.recordErr(err)
-		l.log.Printf("vkturnsrtp: dial backend %s: %v", l.cfg.ConnectAddr, err)
-		return
-	}
-	defer func() {
-		if err := serverConn.Close(); err != nil {
-			l.log.Printf("vkturnsrtp: close backend conn: %v", err)
-		}
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
 	sessCtx, sessCancel := context.WithCancel(l.ctx)
 	defer sessCancel()
-
-	context.AfterFunc(sessCtx, func() {
-		_ = conn.SetDeadline(time.Now())
-		_ = serverConn.SetDeadline(time.Now())
-	})
 
 	logIOErr := func(stage string, err error) {
 		if isExpectedShutdownErr(sessCtx, err) {
@@ -163,90 +150,135 @@ func (l *listener) forwardUDP(conn net.Conn) {
 		}
 		l.log.Printf("vkturnsrtp: %s: %v", stage, err)
 	}
+	dialWG := func() (net.Conn, error) {
+		c, err := net.Dial("udp", l.cfg.ConnectAddr)
+		if err != nil {
+			l.recordErr(err)
+			l.log.Printf("vkturnsrtp: dial backend %s: %v", l.cfg.ConnectAddr, err)
+			return nil, err
+		}
+		return c, nil
+	}
 
-	// client → backend (with probe-echo gate)
-	go func() {
-		defer wg.Done()
-		defer sessCancel()
-		buf := make([]byte, 1600)
-		var lastDeadline time.Time
-		for {
-			select {
-			case <-sessCtx.Done():
-				return
-			default:
+	// The group stays UNKNOWN until the client announces one. Joining a
+	// throwaway group up front was a total-outage bug: the client's first packet
+	// is its hello, moving to the real group emptied the throwaway, and tearing
+	// that down killed the session that had just joined.
+	var (
+		group   *connGroup
+		groupID [groupIDLen]byte
+	)
+	join := func(id [groupIDLen]byte) bool {
+		// A group caught mid-teardown is transient — retry, which creates a
+		// fresh one — rather than dropping the session.
+		var g *connGroup
+		var needPump bool
+		for attempt := 0; attempt < 3; attempt++ {
+			var err error
+			g, needPump, err = l.groups.join(id, conn, dialWG, l.log)
+			if err == nil {
+				break
 			}
-			// Re-arm the idle deadline sparingly, not per packet: it only has
-			// to be in the future, and each call used to allocate a timer plus
-			// a channel that lived for the full 30 minutes (see deadline.go).
-			if time.Since(lastDeadline) > srtpDeadlineRearm {
-				if err := conn.SetReadDeadline(time.Now().Add(srtpIdleDeadline)); err != nil {
-					logIOErr("set srtp read deadline", err)
-					return
-				}
-				lastDeadline = time.Now()
+			if !errors.Is(err, net.ErrClosed) {
+				logIOErr("group join", err)
+				return false
 			}
-			n, err := conn.Read(buf)
-			if err != nil {
-				logIOErr("srtp read", err)
-				return
-			}
-			if isProbePacket(buf[:n]) {
-				// Echo verbatim back through the SRTP conn instead of
-				// forwarding to local WG (where it would be dropped as
-				// an invalid wg message type, leaving the client's
-				// liveness check dormant).
-				if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-					logIOErr("set srtp probe-echo deadline", err)
-					return
-				}
-				if _, err := conn.Write(buf[:n]); err != nil {
-					logIOErr("srtp probe-echo write", err)
-					return
-				}
-				continue
-			}
-			if err := serverConn.SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				logIOErr("set backend write deadline", err)
-				return
-			}
-			if _, err := serverConn.Write(buf[:n]); err != nil {
-				logIOErr("backend write", err)
-				return
-			}
+			g = nil
+		}
+		if g == nil {
+			logIOErr("group join", net.ErrClosed)
+			return false
+		}
+		if group != nil {
+			l.groups.leave(group, conn)
+		}
+		group, groupID = g, id
+		if needPump {
+			// The pump serves the GROUP, so it runs under the listener context,
+			// never under this member's session: one member leaving must not
+			// silence everyone else's downlink.
+			l.wg.Add(1)
+			go func() {
+				defer l.wg.Done()
+				g.runDownlink(l.ctx, logIOErr)
+			}()
+		}
+		return true
+	}
+	defer func() {
+		if group != nil {
+			l.groups.leave(group, conn)
 		}
 	}()
-	// backend → client
-	go func() {
-		defer wg.Done()
-		defer sessCancel()
-		buf := make([]byte, 1600)
-		for {
-			select {
-			case <-sessCtx.Done():
+
+	context.AfterFunc(sessCtx, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
+
+	// client → WireGuard, with the probe echo and the group hello gated out.
+	buf := make([]byte, 1600)
+	var lastDeadline time.Time
+	for {
+		select {
+		case <-sessCtx.Done():
+			return
+		default:
+		}
+		// Re-arm the idle deadline sparingly, not per packet: it only has to be
+		// in the future, and each call used to allocate a timer plus a channel
+		// that lived for the full 30 minutes (see deadline.go).
+		if time.Since(lastDeadline) > srtpDeadlineRearm {
+			if err := conn.SetReadDeadline(time.Now().Add(srtpIdleDeadline)); err != nil {
+				logIOErr("set srtp read deadline", err)
 				return
-			default:
 			}
-			if err := serverConn.SetReadDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				logIOErr("set backend read deadline", err)
-				return
-			}
-			n, err := serverConn.Read(buf)
-			if err != nil {
-				logIOErr("backend read", err)
-				return
-			}
-			if err := conn.SetWriteDeadline(time.Now().Add(30 * time.Minute)); err != nil {
-				logIOErr("set srtp write deadline", err)
+			lastDeadline = time.Now()
+		}
+		n, err := conn.Read(buf)
+		if err != nil {
+			logIOErr("srtp read", err)
+			return
+		}
+		if isProbePacket(buf[:n]) {
+			// Echo verbatim instead of forwarding to WireGuard, where it would
+			// be dropped as an invalid message type and leave the client's
+			// liveness check dormant.
+			if err := conn.SetWriteDeadline(time.Now().Add(groupWriteTimeout)); err != nil {
+				logIOErr("set srtp probe-echo deadline", err)
 				return
 			}
 			if _, err := conn.Write(buf[:n]); err != nil {
-				logIOErr("srtp write", err)
+				logIOErr("srtp probe-echo write", err)
+				return
+			}
+			continue
+		}
+		if id, ok := ParseGroupHello(buf[:n]); ok {
+			// Re-announcing the same id is a no-op — the client repeats the
+			// hello alongside its liveness probe so a single lost datagram
+			// cannot silently leave this allocation ungrouped. A different id
+			// moves this conn, which is how a client rotates after a path change.
+			if (group == nil || id != groupID) && !join(id) {
+				return
+			}
+			continue
+		}
+		if group == nil {
+			// No hello ever arrived: an older client. Give it a group of one,
+			// keyed by a random id — the pre-grouping behaviour.
+			if _, err := rand.Read(groupID[:]); err != nil {
+				logIOErr("group id", err)
+				return
+			}
+			if !join(groupID) {
 				return
 			}
 		}
-	}()
-	wg.Wait()
+		if err := group.writeUplink(buf[:n]); err != nil {
+			logIOErr("group wg write", err)
+			return
+		}
+	}
 }
 
 func (l *listener) Status() relay.Status {

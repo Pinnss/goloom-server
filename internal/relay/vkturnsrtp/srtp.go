@@ -436,7 +436,12 @@ func (a *packetConnAdapter) SetReadDeadline(t time.Time) error {
 func (a *packetConnAdapter) SetWriteDeadline(t time.Time) error { return nil }
 
 func (a *packetConnAdapter) Close() error {
-	a.closeOnce.Do(func() { close(a.closed) })
+	a.closeOnce.Do(func() {
+		close(a.closed)
+		// Release the deadline timer: an armed 30-minute timer would otherwise
+		// pin this conn and its channel for half an hour after it is gone.
+		a.dl.stop()
+	})
 	return nil
 }
 
@@ -626,6 +631,7 @@ func (c *wrappedConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.dl.stop() // see packetConnAdapter.Close
 		if c.onClose != nil {
 			c.onClose()
 		}
