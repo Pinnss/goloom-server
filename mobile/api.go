@@ -135,6 +135,23 @@ type Client struct {
 
 	tx, rx atomic.Uint64
 
+	// vkIdentities caches the extra VK identities minted for the TURN pool, with
+	// the moment they were obtained. Each one cost the user a captcha, so a
+	// reconnect inside the window must not ask again; past it they are dropped
+	// rather than handed to VK as stale credentials.
+	identMu       sync.Mutex
+	vkIdentities  []wgclient.TURNIdentity
+	vkIdentityTCP bool
+	vkIdentityAt  time.Time
+
+	// credsExpireUnix is when the VK credentials behind the tunnel start dying,
+	// as unix seconds; 0 when unknown. VK issues them for about eight hours and
+	// pion refreshes each allocation with the SAME credential, so past this the
+	// allocations go and only a fresh authentication brings them back. The app
+	// reads it through StatsJSON so it can warn BEFORE the tunnel degrades
+	// instead of leaving the user to discover it mid-use.
+	credsExpireUnix atomic.Int64
+
 	// srtpBind is the live vk-turn-srtp bind, when that transport is the one
 	// running. Held so StatsJSON can report real tunnel bytes: the SRTP path
 	// used to leave tx/rx at zero forever, which made a stalled tunnel
@@ -618,6 +635,7 @@ func (c *Client) Disconnect() {
 	if bind := c.srtpBind.Swap(nil); bind != nil {
 		_ = bind.Shutdown()
 	}
+	c.credsExpireUnix.Store(0)
 }
 
 // IsConnected returns whether the relay goroutine is still alive.
@@ -629,13 +647,15 @@ func (c *Client) IsConnected() bool {
 // Cheap enough to call from a UI timer.
 func (c *Client) StatsJSON() string {
 	out := struct {
-		TxBytes   uint64 `json:"tx_bytes"`
-		RxBytes   uint64 `json:"rx_bytes"`
-		Connected bool   `json:"connected"`
+		TxBytes         uint64 `json:"tx_bytes"`
+		RxBytes         uint64 `json:"rx_bytes"`
+		Connected       bool   `json:"connected"`
+		CredsExpireUnix int64  `json:"creds_expire_unix"`
 	}{
-		TxBytes:   c.tx.Load(),
-		RxBytes:   c.rx.Load(),
-		Connected: c.running.Load(),
+		TxBytes:         c.tx.Load(),
+		RxBytes:         c.rx.Load(),
+		Connected:       c.running.Load(),
+		CredsExpireUnix: c.credsExpireUnix.Load(),
 	}
 	// vk-turn-srtp keeps its counters on the bind rather than a WGJoiner, and
 	// has no stats loop of its own: read them straight through, so "On but not

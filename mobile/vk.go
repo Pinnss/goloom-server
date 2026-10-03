@@ -14,8 +14,8 @@ import (
 	"github.com/Pinnss/goloom-server/internal/connstr"
 	"github.com/Pinnss/goloom-server/internal/identity"
 	"github.com/Pinnss/goloom-server/internal/sfu"
-	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgrelay"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 )
 
 // runVKSession — мобильный аналог wgclient.runOnce для VK Calls.
@@ -171,6 +171,23 @@ func (c *Client) buildVKCaptchaSolver() sfu.VKCaptchaSolver {
 		return vkauth.WithReplaySolver(store, base, c.logger)
 	}
 	return base
+}
+
+// CancelVKCaptcha сообщает, что WebView с капчей закрыли, не решив её.
+//
+// Без этого Solve досиживает до своего двухминутного таймаута: пользователь уже
+// ответил «не сейчас», а подключение всё ещё стоит. Для необязательной личности
+// (пул кредов) это особенно заметно — отказ там штатный исход, а не ошибка.
+//
+// Безопасно вызывать, когда никто не ждёт: токен мог прийти мгновением раньше,
+// и та попытка уже завершилась.
+func (c *Client) CancelVKCaptcha() {
+	c.mu.Lock()
+	native := c.captchaNative
+	c.mu.Unlock()
+	if native != nil {
+		native.Cancel()
+	}
 }
 
 // SubmitVKCaptchaToken принимает success_token, который native-сторона

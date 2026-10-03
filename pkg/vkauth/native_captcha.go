@@ -32,6 +32,11 @@ import (
 )
 
 // ErrNoRedirectURI — challenge без redirect_uri: открывать в WebView нечего.
+// ErrCaptchaDismissed reports that the user closed the captcha without solving
+// it. Distinct from a timeout so a caller can tell "not now" from "no answer" —
+// for an optional identity the first is an instant, deliberate no.
+var ErrCaptchaDismissed = errors.New("captcha dismissed by the user")
+
 var ErrNoRedirectURI = errors.New("vkcalls: native captcha: challenge has no redirect_uri")
 
 // NativeCaptchaSolver открывает VK'шный captcha URL в нативном WebView и
@@ -43,6 +48,13 @@ type NativeCaptchaSolver struct {
 
 	mu sync.Mutex
 	ch chan string // не nil только пока Solve ждёт токен
+
+	// cancelCh закрывается, когда native сообщает, что WebView закрыли без
+	// решения. Без него Solve досиживал до своего таймаута — две минуты, в
+	// течение которых подключение просто стояло, хотя пользователь уже ответил
+	// «не сейчас». Отдельный канал, а не закрытие ch: токен может прийти в тот
+	// же момент, и закрывать канал, в который кто-то пишет, нельзя.
+	cancelCh chan struct{}
 	// sessionToken — session_token активной попытки; по нему [Submit]
 	// отсекает токены, снятые с уже протухшей страницы captcha.
 	sessionToken string
@@ -112,8 +124,10 @@ func (s *NativeCaptchaSolver) Solve(ctx context.Context, ch sfu.VKCaptchaChallen
 	}
 
 	tokens := make(chan string, 1)
+	cancelled := make(chan struct{})
 	s.mu.Lock()
 	s.ch = tokens
+	s.cancelCh = cancelled
 	s.sessionToken = sessionTokenFromURL(ch.RedirectURI)
 	s.mu.Unlock()
 	defer func() {
@@ -124,6 +138,9 @@ func (s *NativeCaptchaSolver) Solve(ctx context.Context, ch sfu.VKCaptchaChallen
 		s.mu.Lock()
 		if s.ch == tokens {
 			s.ch = nil
+		}
+		if s.cancelCh == cancelled {
+			s.cancelCh = nil
 		}
 		s.mu.Unlock()
 	}()
@@ -138,9 +155,25 @@ func (s *NativeCaptchaSolver) Solve(ctx context.Context, ch sfu.VKCaptchaChallen
 	case tok := <-tokens:
 		s.logf("captcha-native: success_token received (%d bytes)", len(tok))
 		return sfu.VKCaptchaSolution{SuccessToken: tok}, nil
+	case <-cancelled:
+		s.logf("captcha-native: dismissed by the user")
+		return sfu.VKCaptchaSolution{}, ErrCaptchaDismissed
 	case <-ctx.Done():
 		s.logf("captcha-native: %v", ctx.Err())
 		return sfu.VKCaptchaSolution{}, ctx.Err()
+	}
+}
+
+// Cancel unblocks a Solve that is still waiting, because the WebView was closed
+// without a solution. It is safe to call when nothing is waiting — the token may
+// have arrived microseconds earlier and that attempt has already finished.
+func (s *NativeCaptchaSolver) Cancel() {
+	s.mu.Lock()
+	cancelled := s.cancelCh
+	s.cancelCh = nil
+	s.mu.Unlock()
+	if cancelled != nil {
+		close(cancelled)
 	}
 }
 
