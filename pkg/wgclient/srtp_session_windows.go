@@ -122,7 +122,11 @@ func runVKTurnSRTPSession(ctx context.Context, lg *log.Logger, cfg Config, rmAny
 		return errors.New("vk-turn-srtp: VK returned no usable TURN endpoints (all were turns:// or unparseable)")
 	}
 
-	pool, srtpConns, err := NewSRTPPool(ctx, turnEndpoints, cfg.VKTurnSRTP.PeerAddress, creds, numConns, lg)
+	// The desktop path authenticates once, so it has a single identity. Its
+	// ceiling is therefore the per-credential quota; pooling identities is a
+	// mobile feature for now because each one costs a pass through the captcha.
+	identities := []TURNIdentity{{Creds: creds, Endpoints: turnEndpoints}}
+	pool, srtpConns, err := NewSRTPPool(ctx, identities, cfg.VKTurnSRTP.PeerAddress, numConns, lg)
 	if err != nil {
 		return fmt.Errorf("vk-turn-srtp: %w", err)
 	}

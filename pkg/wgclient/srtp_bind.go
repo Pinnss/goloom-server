@@ -105,11 +105,12 @@ type SRTPBind struct {
 	// Open() time. lastPongUnix stores Unix seconds of the most recent
 	// probe-echo for conn i; dead[i] is set when the watchdog gives up
 	// on a conn (subsequent Send picks skip it).
-	lastPongUnix []atomic.Int64
-	pingSeq      []atomic.Uint64
-	dead         []atomic.Bool
-	serverProbed atomic.Bool // any pong ever seen → probes are armed
-	quotaLogged  atomic.Bool // say "out of quota" once, not per slot per cycle
+	lastPongUnix  []atomic.Int64
+	pingSeq       []atomic.Uint64
+	dead          []atomic.Bool
+	serverProbed  atomic.Bool // any pong ever seen → probes are armed
+	quotaLogged   atomic.Bool // say "out of quota" once, not per slot per cycle
+	expiredLogged atomic.Bool // likewise for expired credentials
 
 	// nextRedialUnix[i] throttles slot i's replacement attempts, so a VK-side
 	// outage cannot turn into an allocate storm.
@@ -474,6 +475,16 @@ func (b *SRTPBind) tryRedial(idx int, nowUnix int64) {
 	// b.ctx is cancelled by Close, which aborts the dial instead of waiting.
 	nc, err := b.Redial(b.ctx, idx)
 	if err != nil {
+		if errors.Is(err, ErrTURNCredentialExpired) {
+			// Only a fresh VK authentication can fix this, and that needs the
+			// user. Retrying on the ordinary backoff would hammer VK forever
+			// with requests that cannot succeed.
+			b.nextRedialUnix[idx].Store(nowUnix + int64(quotaRedialBackoff/time.Second))
+			if b.logger != nil && !b.expiredLogged.Swap(true) {
+				b.logger.Printf("srtp-bind: VK credentials have expired; the tunnel needs a reconnect to re-authenticate")
+			}
+			return
+		}
 		if errors.Is(err, ErrTURNQuota) {
 			// Nothing changes until one of our own allocations goes away, so
 			// stop asking for a while instead of every redialBackoff.

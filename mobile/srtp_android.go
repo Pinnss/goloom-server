@@ -30,6 +30,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/Pinnss/goloom-server/internal/identity"
+	"github.com/Pinnss/goloom-server/internal/sfu"
 	"github.com/Pinnss/goloom-server/internal/sfu/vkcalls"
 	"github.com/Pinnss/goloom-server/pkg/wgclient"
 )
@@ -131,7 +132,6 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 	c.logger.Printf("vk-turn-srtp: VK auth ok — %d TURN URL(s), peer_id=%s", len(authRes.TurnURLs), authRes.PeerID)
 
 	// ── TURN allocate + DTLS-SRTP handshake (N parallel) ───────────
-	c.emitPhase("turn_allocate", fmt.Sprintf("opening %d parallel relays", maxInt(cfg.VKTurnSRTP.NumConnections, 10)))
 	turnEndpoints := mobileFilterTurnEndpoints(authRes.TurnURLs)
 	if len(turnEndpoints) == 0 {
 		cancel()
@@ -148,13 +148,39 @@ func (c *Client) ConnectVKTurnSRTP(connectionString string, tunFd int) (string, 
 	// Default to TCP control channel (anton48 build128+ default).
 	// Per-cred VK allocation-rate throttle is ~0% on TCP vs 36-58%
 	// on UDP. Honour UseUDPForTURN if the link / settings flipped it.
-	creds := wgclient.TURNCreds{
-		Username: authRes.TurnUser,
-		Password: authRes.TurnPass,
-		UseTCP:   !cfg.VKTurnSRTP.UseUDPForTURN,
+	useTCP := !cfg.VKTurnSRTP.UseUDPForTURN
+	identities := []wgclient.TURNIdentity{{
+		Creds: wgclient.TURNCreds{
+			Username: authRes.TurnUser,
+			Password: authRes.TurnPass,
+			UseTCP:   useTCP,
+		},
+		Endpoints: turnEndpoints,
+	}}
+
+	// VK's quota is per credential, so one identity caps the tunnel at
+	// relays x 10 allocations whatever numConnections says. Each extra identity
+	// is a whole anonymous join — and a captcha the USER taps through — so they
+	// are minted only while they are still needed, one at a time, and anything
+	// that fails just leaves the pool smaller.
+	identities = append(identities, c.mintExtraIdentities(
+		parentCtx, cfg, displayName, solver, useTCP, numConns, len(turnEndpoints), authRes.TurnUser)...)
+
+	if exp := wgclient.EarliestExpiry(identities); !exp.IsZero() {
+		c.credsExpireUnix.Store(exp.Unix())
+		c.logger.Printf("vk-turn-srtp: VK credentials good until %s", exp.UTC().Format(time.RFC3339))
+	} else {
+		c.credsExpireUnix.Store(0)
 	}
+
+	// Announced only now: minting can stop for more captchas, and a phase that
+	// went turn_allocate -> vk_auth -> turn_allocate would read as the connect
+	// going backwards.
+	c.emitPhase("turn_allocate", fmt.Sprintf("opening %d relays across %d identity/identities",
+		numConns, len(identities)))
+
 	pool, srtpConns, poolErr := wgclient.NewSRTPPool(
-		parentCtx, turnEndpoints, cfg.VKTurnSRTP.PeerAddress, creds, numConns, c.logger)
+		parentCtx, identities, cfg.VKTurnSRTP.PeerAddress, numConns, c.logger)
 	if poolErr != nil {
 		cancel()
 		err := mobileErr(ErrSessionSetup, poolErr)
@@ -317,6 +343,115 @@ func adoptTUNWithSRTPBind(c *Client, tunFd int, srtpConns []net.Conn, wg wgclien
 	c.logger.Printf("vk-turn-srtp: wg-userspace adopted tun '%s' fd=%d (pool=%d/%d)",
 		name, tunFd, connsUp(srtpConns), len(srtpConns))
 	return nil
+}
+
+// mintExtraIdentities runs the anonymous-join flow again for each identity the
+// pool still needs beyond the one already in hand.
+//
+// Every one of these is a captcha the USER solves by hand, so this is written to
+// be frugal and interruptible: it asks for the fewest identities that cover
+// numConns, reuses anything still fresh from an earlier connect, stops at the
+// first failure instead of marching through the rest, and never turns a failure
+// into a connect error — a smaller pool is a slower tunnel, not a broken one.
+func (c *Client) mintExtraIdentities(
+	ctx context.Context,
+	cfg wgclient.Config,
+	displayName string,
+	solver sfu.VKCaptchaSolver,
+	useTCP bool,
+	numConns, relays int,
+	primaryUser string,
+) []wgclient.TURNIdentity {
+	// relays is what the FIRST identity was given. A later one could in principle
+	// be handed a different number; that only makes this estimate slightly off,
+	// because the planner lays slots out from each identity's own relay list.
+	want := wgclient.IdentitiesNeeded(numConns, relays)
+	if want <= 1 {
+		return nil
+	}
+
+	// Track which VK users we already hold, counting the caller's own identity:
+	// a repeat shares its quota and is worth nothing.
+	seen := map[string]bool{}
+	if user, _, ok := wgclient.TURNUserID(primaryUser); ok {
+		seen[user] = true
+	}
+
+	// Cached identities must be checked against `seen` too, not merely added to
+	// it. The primary identity is minted fresh on every connect and VK can hand
+	// back a user we already hold, so a cached entry can collide with it. Such
+	// an entry is not merely useless: planSlots would still give it a full
+	// quota's worth of slots, its first allocate would be refused 486, and the
+	// rest of its block would be skipped — stranding a third of the pool the
+	// user paid a captcha for, with nothing in the log naming the cause.
+	var usable []wgclient.TURNIdentity
+	for _, id := range c.freshIdentities(useTCP) {
+		user, _, ok := wgclient.TURNUserID(id.Creds.Username)
+		if ok && seen[user] {
+			c.logger.Printf("vk-turn-srtp: dropping a cached identity — VK re-issued the same user, " +
+				"so it would share a quota instead of adding one")
+			continue
+		}
+		if ok {
+			seen[user] = true
+		}
+		usable = append(usable, id)
+	}
+	if len(usable) >= want-1 {
+		c.logger.Printf("vk-turn-srtp: reusing %d cached identity/identities — no captcha needed", want-1)
+		return usable[:want-1]
+	}
+	out := usable
+
+	for len(out) < want-1 {
+		have := len(out) + 1 // the caller's own identity counts
+		c.emitPhase("vk_auth", fmt.Sprintf("identity %d of %d — solve the captcha to widen the tunnel", have+1, want))
+
+		authCtx, authCancel := context.WithTimeout(ctx, 3*time.Minute)
+		res, err := vkcalls.DoAuth(authCtx, c.logger, vkcalls.AuthSpec{
+			ShortID:  parseShortIDFromVKLink(cfg.Meeting),
+			Name:     displayName,
+			DeviceID: uuid.NewString(),
+			Solver:   solver,
+		})
+		authCancel()
+		if err != nil {
+			// Cancelled captcha, timeout, VK refusing another anonymous join —
+			// all the same here: keep what we have and get the tunnel up.
+			c.logger.Printf("vk-turn-srtp: identity %d/%d not obtained (%v); continuing with %d",
+				have+1, want, err, have)
+			break
+		}
+		eps := mobileFilterTurnEndpoints(res.TurnURLs)
+		if len(eps) == 0 {
+			c.logger.Printf("vk-turn-srtp: identity %d/%d returned no UDP relays; continuing with %d",
+				have+1, want, have)
+			break
+		}
+		// VK sometimes hands back an anonymous user we already hold. The quota
+		// is keyed on the user, so such an identity adds no allocations at all —
+		// and asking for another captcha would spend the user's time on nothing.
+		if user, _, ok := wgclient.TURNUserID(res.TurnUser); ok {
+			if seen[user] {
+				c.logger.Printf("vk-turn-srtp: identity %d/%d is the same VK user as one we hold — "+
+					"it shares its quota, so stopping at %d", have+1, want, have)
+				break
+			}
+			seen[user] = true
+		}
+		out = append(out, wgclient.TURNIdentity{
+			Creds: wgclient.TURNCreds{
+				Username: res.TurnUser,
+				Password: res.TurnPass,
+				UseTCP:   useTCP,
+			},
+			Endpoints: eps,
+		})
+		c.logger.Printf("vk-turn-srtp: identity %d/%d ok — %d relay(s)", have+1, want, len(eps))
+	}
+
+	c.storeIdentities(out, useTCP)
+	return out
 }
 
 // connsUp counts the slots that actually hold a conn; the rest are nil
