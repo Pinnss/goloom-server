@@ -23,7 +23,7 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.currentUser(r); ok {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, URL(r.Context(), "/"), http.StatusSeeOther)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -64,7 +64,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    tok,
-		Path:     "/",
+		Path:     s.cookiePath(),
 		HttpOnly: true,
 		// Secure cookie only over TLS, otherwise browsers drop it on
 		// http (matters for local dev where TLS is off).
@@ -104,7 +104,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     s.cookiePath(),
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
@@ -121,6 +121,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 type changePasswordReq struct {
 	Current string `json:"current"`
 	New     string `json:"new"`
+	Confirm string `json:"confirm"`
 }
 
 // handleChangePassword accepts JSON (json-enc HTMX, fetch) or form
@@ -160,7 +161,10 @@ func decodeChangePasswordRequest(r *http.Request) (changePasswordReq, string, er
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			return changePasswordReq{}, "", err
 		}
-		return req, "", nil
+		// Returning "" here discarded the confirmation, so the equality check
+		// in the caller was skipped for every JSON client — the field looked
+		// like a safeguard and was not one.
+		return req, req.Confirm, nil
 	default:
 		if err := r.ParseForm(); err != nil {
 			return changePasswordReq{}, "", err

@@ -8,11 +8,16 @@ package pages
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
+import "github.com/Pinnss/goloom-server/internal/admin/uipath"
+
 // InboundForm renders the create/edit form for one inbound. The
 // `Transport` dropdown chooses between Telemost, WB Stream, and VK
 // Calls. Per-transport hints are shown via Alpine x-show, but there
-// is exactly ONE meeting input — duplicate `name="meeting"` would
-// produce ambiguous JSON when serialised by hx-ext=json-enc.
+// is exactly ONE meeting input — a duplicate `name="meeting"` would
+// submit two values for one field and the decoder would have to guess.
+// The refresh target is RELATIVE: resolved against the dashboard it is
+// /htmx/inbounds at the root and /prefix/htmx/inbounds under a base path.
+// templ compiles hx-on:: as a script, so the prefix cannot be interpolated.
 func InboundForm() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -41,39 +46,52 @@ func InboundForm() templ.Component {
 		var templ_7745c5c3_Var2 string
 		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs("{ transport: 'telemost', vkCaptcha: 'admin-webview' }")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 11, Col: 66}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 16, Col: 66}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" hx-post=\"/api/inbounds\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', '/htmx/inbounds', '#inbound-card-list'); }\"><div><label class=\"field-label\">Tag (короткое имя)</label> <input class=\"field-input\" name=\"tag\" placeholder=\"personal\"></div><div><label class=\"field-label\">Transport</label> <select class=\"field-input\" name=\"transport\" x-model=\"transport\"><option value=\"telemost\">Telemost</option> <option value=\"wb_stream\">WB Stream</option> <option value=\"vk-calls\">VK Calls</option> <option value=\"vk-turn-srtp\">VK TURN SRTP (рекомендуется, ~30 Mbps)</option> <option value=\"vk-turn\">VK TURN legacy DTLS (~2 Mbps, deprecated)</option></select></div><div><label class=\"field-label\"><span x-show=\"transport === 'telemost'\">Meeting URL (Telemost)</span> <span x-show=\"transport === 'wb_stream'\">Room URL (WB Stream)</span> <span x-show=\"transport === 'vk-calls'\">VK Call link</span> <span x-show=\"transport === 'vk-turn' || transport === 'vk-turn-srtp'\">VK Call link (для TURN-credentials клиента)</span></label> <input class=\"field-input\" name=\"meeting\" :placeholder=\"transport === 'telemost' ? 'https://telemost.yandex.ru/j/...' : transport === 'wb_stream' ? 'https://stream.wb.ru/r/...' : 'https://vk.com/call/join/...'\"></div><div x-show=\"transport === 'wb_stream'\" x-cloak><button type=\"button\" class=\"btn-ghost mt-1 text-xs\" disabled title=\"Будет включено после мерджа feat/sfu-multi-transport\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" hx-post=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var3 string
-		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs("🔐 Authenticate via WB")
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/api/inbounds"))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 52, Col: 32}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 17, Col: 44}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</button></div><div x-show=\"transport === 'vk-calls'\" x-cloak><label class=\"field-label\">Captcha mode</label> <select class=\"field-input\" name=\"vk_captcha_mode\" x-model=\"vkCaptcha\"><option value=\"admin-webview\">Admin webview (этот сервер; default)</option> <option value=\"auto\">Auto — system browser (нужен desktop session)</option> <option value=\"none\">None — fail-fast on captcha</option></select><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'admin-webview'\">Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.</p><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'auto'\">Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.</p><input type=\"hidden\" name=\"vk_role\" value=\"receiver\"></div><div x-show=\"transport === 'vk-turn-srtp' || transport === 'vk-turn'\" x-cloak class=\"flex flex-col gap-2\"><div><label class=\"field-label\">Listen address (UDP)</label> <input class=\"field-input\" name=\"vk_turn_listen_addr\" placeholder=\"0.0.0.0:56001\" value=\"0.0.0.0:56001\"><p class=\"text-xs opacity-60 mt-1\">Каждый vk-turn инбаунд должен слушать свой порт. Если на хосте уже работает legacy vk-turn-server на 56000 — поставь 56001+.</p></div><p x-show=\"transport === 'vk-turn-srtp'\" class=\"text-xs opacity-70\">SRTP заворачивает WG в WebRTC media — обходит VK-классификатор шейпа, скорость ~30 Mbps. Требует клиента anton48 v1.0-build125+.</p><p x-show=\"transport === 'vk-turn'\" class=\"text-xs opacity-70 text-amber-300\">Legacy DTLS+WG путь: VK шейпит до ~7-9 KB/s per allocation. Оставлено только для совместимости со старыми клиентами.</p></div><div><label class=\"field-label\">Display name (пусто = случайное)</label> <input class=\"field-input\" name=\"display_name\"></div><div x-show=\"transport === '' || transport === 'telemost'\"><label class=\"field-label\">Pool size (1 = выкл, 2-10 = N паралл. участников комнаты)</label> <input class=\"field-input\" type=\"number\" name=\"pool_size\" min=\"1\" max=\"20\" value=\"1\"><p class=\"text-xs opacity-70\">Yandex Telemost режет каждого паблишера до ~3 Мбит/с. N участников от одного логического инбаунда даёт ~N×3 Мбит/с download. Клиент должен быть с тем же pool_size (передаётся в connection string).</p></div><div x-data=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', 'htmx/inbounds', '#inbound-card-list'); }\"><div><label class=\"field-label\">Tag (короткое имя)</label> <input class=\"field-input\" name=\"tag\" placeholder=\"personal\"></div><div><label class=\"field-label\">Transport</label> <select class=\"field-input\" name=\"transport\" x-model=\"transport\"><option value=\"telemost\">Telemost</option> <option value=\"wb_stream\">WB Stream</option> <option value=\"vk-calls\">VK Calls</option> <option value=\"vk-turn-srtp\">VK TURN SRTP (рекомендуется, ~30 Mbps)</option> <option value=\"vk-turn\">VK TURN legacy DTLS (~2 Mbps, deprecated)</option></select></div><div><label class=\"field-label\"><span x-show=\"transport === 'telemost'\">Meeting URL (Telemost)</span> <span x-show=\"transport === 'wb_stream'\">Room URL (WB Stream)</span> <span x-show=\"transport === 'vk-calls'\">VK Call link</span> <span x-show=\"transport === 'vk-turn' || transport === 'vk-turn-srtp'\">VK Call link (для TURN-credentials клиента)</span></label> <input class=\"field-input\" name=\"meeting\" :placeholder=\"transport === 'telemost' ? 'https://telemost.yandex.ru/j/...' : transport === 'wb_stream' ? 'https://stream.wb.ru/r/...' : 'https://vk.com/call/join/...'\"></div><div x-show=\"transport === 'wb_stream'\" x-cloak><button type=\"button\" class=\"btn-ghost mt-1 text-xs\" disabled title=\"Будет включено после мерджа feat/sfu-multi-transport\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var4 string
-		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs("{ auto: true }")
+		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs("🔐 Authenticate via WB")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 105, Col: 32}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 56, Col: 32}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "\"><label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"auto_provision\" x-model=\"auto\" checked> <span>Создать новый WG-интерфейс автоматически</span></label><div class=\"mt-2\" x-show=\"!auto\" x-cloak><label class=\"field-label\">WG endpoint (если без авто-провижна)</label> <input class=\"field-input\" name=\"wg_endpoint\" value=\"127.0.0.1:51820\"></div></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Создать</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.inbound = false\">Отмена</button></div></form>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</button></div><div x-show=\"transport === 'vk-calls'\" x-cloak><label class=\"field-label\">Captcha mode</label> <select class=\"field-input\" name=\"vk_captcha_mode\" x-model=\"vkCaptcha\"><option value=\"admin-webview\">Admin webview (этот сервер; default)</option> <option value=\"auto\">Auto — system browser (нужен desktop session)</option> <option value=\"none\">None — fail-fast on captcha</option></select><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'admin-webview'\">Когда auth попросит капчу, в шапке появится бейдж — кликни и реши в одном клике.</p><p class=\"text-xs opacity-60 mt-1\" x-show=\"vkCaptcha === 'auto'\">Откроется системный браузер на хосте сервера. Только для laptop / dev-машин с GUI.</p><input type=\"hidden\" name=\"vk_role\" value=\"receiver\"></div><div x-show=\"transport === 'vk-turn-srtp' || transport === 'vk-turn'\" x-cloak class=\"flex flex-col gap-2\"><div><label class=\"field-label\">Listen address (UDP)</label> <input class=\"field-input\" name=\"vk_turn_listen_addr\" placeholder=\"0.0.0.0:56001\" value=\"0.0.0.0:56001\"><p class=\"text-xs opacity-60 mt-1\">Каждый vk-turn инбаунд должен слушать свой порт. Если на хосте уже работает legacy vk-turn-server на 56000 — поставь 56001+.</p></div><p x-show=\"transport === 'vk-turn-srtp'\" class=\"text-xs opacity-70\">SRTP заворачивает WG в WebRTC media — обходит VK-классификатор шейпа, скорость ~30 Mbps. Требует клиента anton48 v1.0-build125+.</p><p x-show=\"transport === 'vk-turn'\" class=\"text-xs opacity-70 text-amber-300\">Legacy DTLS+WG путь: VK шейпит до ~7-9 KB/s per allocation. Оставлено только для совместимости со старыми клиентами.</p></div><div><label class=\"field-label\">Display name (пусто = случайное)</label> <input class=\"field-input\" name=\"display_name\"></div><div x-show=\"transport === '' || transport === 'telemost'\"><label class=\"field-label\">Pool size (1 = выкл, 2-10 = N паралл. участников комнаты)</label> <input class=\"field-input\" type=\"number\" name=\"pool_size\" min=\"1\" max=\"20\" value=\"1\"><p class=\"text-xs opacity-70\">Yandex Telemost режет каждого паблишера до ~3 Мбит/с. N участников от одного логического инбаунда даёт ~N×3 Мбит/с download. Клиент должен быть с тем же pool_size (передаётся в connection string).</p></div><div x-data=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var5 string
+		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs("{ auto: true }")
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/inbound_form.templ`, Line: 109, Col: 32}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\"><label class=\"inline-flex items-center gap-2 text-sm\"><input type=\"checkbox\" name=\"auto_provision\" x-model=\"auto\" checked> <span>Создать новый WG-интерфейс автоматически</span></label><div class=\"mt-2\" x-show=\"!auto\" x-cloak><label class=\"field-label\">WG endpoint (если без авто-провижна)</label> <input class=\"field-input\" name=\"wg_endpoint\" value=\"127.0.0.1:51820\"></div></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Создать</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.inbound = false\">Отмена</button></div></form>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -11,6 +11,7 @@ import templruntime "github.com/a-h/templ/runtime"
 import (
 	"github.com/Pinnss/goloom-server/internal/admin/ui"
 	"github.com/Pinnss/goloom-server/internal/admin/ui/components"
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 	"github.com/Pinnss/goloom-server/internal/inbound"
 )
 
@@ -25,6 +26,9 @@ type DashboardData struct {
 // Dashboard renders the main control surface — list of inbounds with
 // live status (HTMX SSE), a header bar with account dropdown, and
 // the WG-interface table at the bottom.
+// The logout redirect is RELATIVE: "login" resolves against / as /login and
+// against /prefix/ as /prefix/login, so it works under any base path without
+// the prefix being interpolated into the script attribute.
 func Dashboard(d DashboardData) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -85,7 +89,7 @@ func Dashboard(d DashboardData) templ.Component {
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(d.Username)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 32, Col: 56}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 36, Col: 56}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
@@ -98,36 +102,75 @@ func Dashboard(d DashboardData) templ.Component {
 			var templ_7745c5c3_Var4 string
 			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs("⚙ Аккаунт")
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 36, Col: 28}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 40, Col: 28}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</button> <button class=\"btn-ghost\" hx-post=\"/logout\" hx-on::after-request=\"location='/login'\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</button> <button class=\"btn-ghost\" hx-post=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 string
-			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs("Выйти")
+			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/logout"))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 41, Col: 20}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 43, Col: 42}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</button></div></header>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\" hx-on::after-request=\"location='login'\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var6 string
+			templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs("Выйти")
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 45, Col: 20}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</button></div></header>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if d.IsDefaultPassword {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<div class=\"rounded-md border border-danger/60 bg-danger/15 text-slate-100 px-4 py-3 mb-4 flex items-center gap-3\"><span class=\"text-xl\">⚠</span> <span class=\"flex-1 text-sm\">Используется временный пароль по умолчанию. <b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.</span> <button class=\"btn-primary\" @click=\"$store.modals.account = true\">Сменить пароль</button></div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div class=\"rounded-md border border-danger/60 bg-danger/15 text-slate-100 px-4 py-3 mb-4 flex items-center gap-3\"><span class=\"text-xl\">⚠</span> <span class=\"flex-1 text-sm\">Используется временный пароль по умолчанию. <b>Смените его сейчас</b>, чтобы никто посторонний не получил доступ к панели.</span> <button class=\"btn-primary\" @click=\"$store.modals.account = true\">Сменить пароль</button></div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div class=\"flex flex-wrap gap-2 mb-4\"><button class=\"btn-primary\" @click=\"$store.modals.inbound = true\">+ Создать inbound</button> <button class=\"btn-ghost\" hx-get=\"/htmx/inbounds\" hx-target=\"#inbound-card-list\" hx-swap=\"outerHTML\">Обновить</button></div><div hx-ext=\"sse\" sse-connect=\"/htmx/inbounds/stream\"><div sse-swap=\"inbounds\" hx-swap=\"outerHTML\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<div class=\"flex flex-wrap gap-2 mb-4\"><button class=\"btn-primary\" @click=\"$store.modals.inbound = true\">+ Создать inbound</button> <button class=\"btn-ghost\" hx-get=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var7 string
+			templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/htmx/inbounds"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 64, Col: 47}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\" hx-target=\"#inbound-card-list\" hx-swap=\"outerHTML\">Обновить</button></div><div hx-ext=\"sse\" sse-connect=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var8 string
+			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/htmx/inbounds/stream"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 72, Col: 75}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "\"><div sse-swap=\"inbounds\" hx-swap=\"outerHTML\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -135,7 +178,20 @@ func Dashboard(d DashboardData) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</div></div><details class=\"mt-6 group\"><summary class=\"cursor-pointer text-muted text-xs select-none\">WG-интерфейсы на сервере</summary><div id=\"wg-list\" class=\"mt-2\" hx-get=\"/htmx/wg-interfaces\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"></div></details><div id=\"toast\" class=\"fixed bottom-4 right-4 z-50\"></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</div></div><details class=\"mt-6 group\"><summary class=\"cursor-pointer text-muted text-xs select-none\">WG-интерфейсы на сервере</summary><div id=\"wg-list\" class=\"mt-2\" hx-get=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var9 string
+			templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/htmx/wg-interfaces"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 85, Col: 52}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"></div></details><div id=\"toast\" class=\"fixed bottom-4 right-4 z-50\"></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -147,7 +203,7 @@ func Dashboard(d DashboardData) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</main>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</main>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -177,12 +233,12 @@ func accountModal() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var6 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var6 == nil {
-			templ_7745c5c3_Var6 = templ.NopComponent
+		templ_7745c5c3_Var10 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var10 == nil {
+			templ_7745c5c3_Var10 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Var7 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_Var11 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 			templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 			templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 			if !templ_7745c5c3_IsBuffer {
@@ -194,13 +250,26 @@ func accountModal() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<form class=\"flex flex-col gap-3\" hx-post=\"/api/admin/password\" hx-ext=\"json-enc\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.account = false; location.reload(); }\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (минимум 8 символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div><label class=\"field-label\">Подтверждение</label> <input class=\"field-input\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\"></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.account = false\">Отмена</button></div></form>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<form class=\"flex flex-col gap-3\" hx-post=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var12 string
+			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/api/admin/password"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 103, Col: 51}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "\" hx-on::after-request=\"if (event.detail.successful) { $store.modals.account = false; location.reload(); }\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (минимум 8 символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div><label class=\"field-label\">Подтверждение</label> <input class=\"field-input\" name=\"confirm\" type=\"password\" autocomplete=\"new-password\"></div><div class=\"flex gap-2 mt-1\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <button class=\"btn-ghost\" type=\"button\" @click=\"$store.modals.account = false\">Отмена</button></div></form>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			return nil
 		})
-		templ_7745c5c3_Err = components.Modal("account", "Сменить пароль").Render(templ.WithChildren(ctx, templ_7745c5c3_Var7), templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = components.Modal("account", "Сменить пароль").Render(templ.WithChildren(ctx, templ_7745c5c3_Var11), templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -224,12 +293,12 @@ func inboundModal() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var8 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var8 == nil {
-			templ_7745c5c3_Var8 = templ.NopComponent
+		templ_7745c5c3_Var13 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var13 == nil {
+			templ_7745c5c3_Var13 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Var9 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
+		templ_7745c5c3_Var14 := templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 			templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 			templ_7745c5c3_Buffer, templ_7745c5c3_IsBuffer := templruntime.GetBuffer(templ_7745c5c3_W)
 			if !templ_7745c5c3_IsBuffer {
@@ -241,13 +310,26 @@ func inboundModal() templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "<div hx-get=\"/htmx/inbound/new\" hx-trigger=\"load\" hx-swap=\"innerHTML\"><div class=\"text-muted text-sm\">Загрузка формы…</div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "<div hx-get=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var15 string
+			templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/htmx/inbound/new"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 128, Col: 52}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "\" hx-trigger=\"load\" hx-swap=\"innerHTML\"><div class=\"text-muted text-sm\">Загрузка формы…</div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			return nil
 		})
-		templ_7745c5c3_Err = components.Modal("inbound", "Новый inbound").Render(templ.WithChildren(ctx, templ_7745c5c3_Var9), templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = components.Modal("inbound", "Новый inbound").Render(templ.WithChildren(ctx, templ_7745c5c3_Var14), templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -278,25 +360,25 @@ func captchaBadge() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var10 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var10 == nil {
-			templ_7745c5c3_Var10 = templ.NopComponent
+		templ_7745c5c3_Var16 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var16 == nil {
+			templ_7745c5c3_Var16 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<div x-data=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "<div x-data=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var11 string
-		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs("{ pending: [], open: false, async refresh() { try { const r = await fetch('/api/captcha/pending'); if (r.ok) this.pending = await r.json() || []; } catch(e) {} } }")
+		var templ_7745c5c3_Var17 string
+		templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs("{ pending: [], open: false, async refresh() { try { const r = await fetch('" + uipath.URL(ctx, "/api/captcha/pending") + "'); if (r.ok) this.pending = await r.json() || []; } catch(e) {} } }")
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 140, Col: 176}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/dashboard.templ`, Line: 143, Col: 203}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "\" x-init=\"refresh(); setInterval(()=>refresh(), 3000)\" x-show=\"pending.length > 0\" x-cloak class=\"relative\"><button type=\"button\" class=\"rounded-md px-2 py-1 bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 inline-flex items-center gap-1\" @click=\"open = !open\" :title=\"'Pending captchas: ' + pending.length\"><span>🛡</span> <span class=\"font-mono\" x-text=\"pending.length\"></span></button><div x-show=\"open\" x-cloak @click.outside=\"open = false\" class=\"absolute right-0 top-full mt-1 w-80 rounded-md border border-slate-700 bg-slate-900 shadow-lg p-2 z-30 text-left\"><div class=\"text-[11px] text-muted uppercase tracking-wide px-2 pb-1 border-b border-slate-800 mb-1\">Captchas waiting for solve</div><template x-for=\"ch in pending\" :key=\"ch.id\"><a :href=\"ch.proxy_url\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"block px-2 py-2 rounded hover:bg-slate-800 text-slate-100\"><div class=\"text-sm font-medium\" x-text=\"ch.inbound_tag || ('challenge ' + ch.id)\"></div><div class=\"text-[11px] text-muted truncate\" x-text=\"ch.proxy_url\"></div><div class=\"text-[10px] text-muted\" x-text=\"'expires ' + new Date(ch.expires_at).toLocaleTimeString()\"></div></a></template></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "\" x-init=\"refresh(); setInterval(()=>refresh(), 3000)\" x-show=\"pending.length > 0\" x-cloak class=\"relative\"><button type=\"button\" class=\"rounded-md px-2 py-1 bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 inline-flex items-center gap-1\" @click=\"open = !open\" :title=\"'Pending captchas: ' + pending.length\"><span>🛡</span> <span class=\"font-mono\" x-text=\"pending.length\"></span></button><div x-show=\"open\" x-cloak @click.outside=\"open = false\" class=\"absolute right-0 top-full mt-1 w-80 rounded-md border border-slate-700 bg-slate-900 shadow-lg p-2 z-30 text-left\"><div class=\"text-[11px] text-muted uppercase tracking-wide px-2 pb-1 border-b border-slate-800 mb-1\">Captchas waiting for solve</div><template x-for=\"ch in pending\" :key=\"ch.id\"><a :href=\"ch.proxy_url\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"block px-2 py-2 rounded hover:bg-slate-800 text-slate-100\"><div class=\"text-sm font-medium\" x-text=\"ch.inbound_tag || ('challenge ' + ch.id)\"></div><div class=\"text-[11px] text-muted truncate\" x-text=\"ch.proxy_url\"></div><div class=\"text-[10px] text-muted\" x-text=\"'expires ' + new Date(ch.expires_at).toLocaleTimeString()\"></div></a></template></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

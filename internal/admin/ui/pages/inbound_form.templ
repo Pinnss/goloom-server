@@ -1,17 +1,21 @@
 package pages
 
+import "github.com/Pinnss/goloom-server/internal/admin/uipath"
+
 // InboundForm renders the create/edit form for one inbound. The
 // `Transport` dropdown chooses between Telemost, WB Stream, and VK
 // Calls. Per-transport hints are shown via Alpine x-show, but there
-// is exactly ONE meeting input — duplicate `name="meeting"` would
-// produce ambiguous JSON when serialised by hx-ext=json-enc.
+// is exactly ONE meeting input — a duplicate `name="meeting"` would
+// submit two values for one field and the decoder would have to guess.
+// The refresh target is RELATIVE: resolved against the dashboard it is
+// /htmx/inbounds at the root and /prefix/htmx/inbounds under a base path.
+// templ compiles hx-on:: as a script, so the prefix cannot be interpolated.
 templ InboundForm() {
 	<form
 		class="flex flex-col gap-3"
 		x-data={ "{ transport: 'telemost', vkCaptcha: 'admin-webview' }" }
-		hx-post="/api/inbounds"
-		hx-ext="json-enc"
-		hx-on::after-request="if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', '/htmx/inbounds', '#inbound-card-list'); }"
+		hx-post={ uipath.URL(ctx, "/api/inbounds") }
+		hx-on::after-request="if (event.detail.successful) { $store.modals.inbound = false; htmx.ajax('GET', 'htmx/inbounds', '#inbound-card-list'); }"
 	>
 		<div>
 			<label class="field-label">Tag (короткое имя)</label>

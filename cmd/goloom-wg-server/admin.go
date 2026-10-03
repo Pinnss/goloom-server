@@ -8,8 +8,8 @@ import (
 
 	"github.com/Pinnss/goloom-server/internal/admin"
 	"github.com/Pinnss/goloom-server/internal/inbound"
-	"github.com/Pinnss/goloom-server/pkg/vkauth"
 	"github.com/Pinnss/goloom-server/internal/wgprovision"
+	"github.com/Pinnss/goloom-server/pkg/vkauth"
 )
 
 type adminServer struct {
@@ -78,6 +78,7 @@ func newAdminServer(cfg *Config, mgr *inbound.Manager, lg *log.Logger) (*adminSe
 	srv, err := admin.New(admin.Options{
 		Listen:         cfg.Admin.Listen,
 		Credentials:    creds,
+		BasePath:       cfg.Admin.BasePath,
 		TLSCert:        cfg.Admin.TLS.Cert,
 		TLSKey:         cfg.Admin.TLS.Key,
 		AutoSelfSigned: cfg.Admin.TLS.AutoSelfSigned,

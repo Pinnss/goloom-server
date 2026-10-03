@@ -41,7 +41,18 @@ import (
 )
 
 type Options struct {
-	Listen         string
+	Listen string
+
+	// BasePath mounts the whole panel under a URL prefix, so it can hide
+	// behind a secret path on a shared vhost the way the rest of this box
+	// hides its panels — without a dedicated subdomain, which would announce
+	// in DNS that something is here.
+	//
+	// Empty means the panel lives at the root, which is the old behaviour.
+	// Leading slash is added and a trailing one removed, so "/sEcReT/" and
+	// "sEcReT" both mean "/sEcReT".
+	BasePath string
+
 	Credentials    *CredentialStore
 	TLSCert        string
 	TLSKey         string
@@ -100,6 +111,8 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
+	opts.BasePath = NormalizeBasePath(opts.BasePath)
+
 	mux := http.NewServeMux()
 	s := &Server{
 		opts:     opts,
@@ -116,9 +129,19 @@ func New(opts Options) (*Server, error) {
 		mux.HandleFunc("GET /api/captcha/pending", s.handleCaptchaPending)
 	}
 
+	// The routes themselves never learn about the prefix: StripPrefix hands
+	// them the paths they already expect. Only the URLs we EMIT — templates,
+	// redirects, the session cookie — have to carry it, which keeps the prefix
+	// from leaking into routing and auth decisions.
+	var handler http.Handler = s.authMiddleware(mux)
+	if s.opts.BasePath != "" {
+		handler = mountUnderBasePath(s.opts.BasePath, handler)
+	}
+	handler = withBasePath(s.opts.BasePath, handler)
+
 	s.srv = &http.Server{
 		Addr:              opts.Listen,
-		Handler:           s.authMiddleware(mux),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig:         tlsCfg,
 	}
@@ -166,7 +189,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			http.Redirect(w, r, URL(r.Context(), "/login"), http.StatusSeeOther)
 			return
 		}
 		next.ServeHTTP(w, r)

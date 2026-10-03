@@ -2,6 +2,7 @@ package pages
 
 import (
 	"github.com/Pinnss/goloom-server/internal/admin/ui"
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 )
 
 // Settings is a standalone change-password page (the dashboard already
@@ -17,9 +18,8 @@ templ Settings(username string) {
 			</header>
 			<form
 				class="card flex flex-col gap-3"
-				hx-post="/api/admin/password"
-				hx-ext="json-enc"
-				hx-target="#settings-msg"
+				hx-post={ uipath.URL(ctx, "/api/admin/password") }
+					hx-target="#settings-msg"
 				hx-swap="innerHTML"
 			>
 				<div>
@@ -33,7 +33,7 @@ templ Settings(username string) {
 				<div id="settings-msg" class="text-xs min-h-[1em]"></div>
 				<div class="flex gap-2">
 					<button class="btn-primary" type="submit">Сменить</button>
-					<a class="btn-ghost" href="/">Назад</a>
+					<a class="btn-ghost" href={ uipath.URL(ctx, "/") }>Назад</a>
 				</div>
 			</form>
 		</main>

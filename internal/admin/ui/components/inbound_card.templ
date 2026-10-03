@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 	"github.com/Pinnss/goloom-server/internal/inbound"
 )
 
@@ -25,7 +26,7 @@ templ InboundCard(s inbound.Status) {
 			<div class="flex gap-1">
 				<button
 					class="btn-ghost text-xs px-2 py-1"
-					hx-post={ "/api/inbounds/" + s.ID + "/toggle" }
+					hx-post={ uipath.URL(ctx, "/api/inbounds/"+s.ID+"/toggle") }
 					hx-swap="none"
 					title="Pause / resume"
 				>
@@ -37,7 +38,7 @@ templ InboundCard(s inbound.Status) {
 				</button>
 				<button
 					class="btn-danger text-xs px-2 py-1"
-					hx-delete={ "/api/inbounds/" + s.ID }
+					hx-delete={ uipath.URL(ctx, "/api/inbounds/"+s.ID) }
 					hx-target={ "#inbound-card-" + s.ID }
 					hx-swap="outerHTML"
 					hx-confirm="Удалить inbound?"
@@ -74,19 +75,19 @@ templ InboundCard(s inbound.Status) {
 
 		if s.RelayListen != "" {
 			<div class="flex items-center justify-center bg-white rounded p-2">
-				<img src={ "/api/inbounds/" + s.ID + "/vkturn-qr.png" } alt="vk-turn QR" class="max-w-[180px] aspect-square"/>
+				<img src={ uipath.URL(ctx, "/api/inbounds/"+s.ID+"/vkturn-qr.png") } alt="vk-turn QR" class="max-w-[180px] aspect-square"/>
 			</div>
 			<div class="flex flex-wrap gap-1.5 mt-1">
 				<button
 					class="btn-primary text-xs px-2 py-1"
-					hx-get={ "/htmx/inbound/" + s.ID + "/vkturn-link" }
+					hx-get={ uipath.URL(ctx, "/htmx/inbound/"+s.ID+"/vkturn-link") }
 					hx-target="#toast"
 					hx-swap="innerHTML"
 					title="Скопировать vkturnproxy:// ссылку"
 				>{ "📋 vkturnproxy://" }</button>
 				<a
 					class="btn-ghost text-xs px-2 py-1"
-					href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
+					href={ templ.SafeURL(uipath.URL(ctx, "/api/inbounds/"+s.ID+"/client.conf")) }
 					download
 					title="WireGuard config (для отладки, без vk-turn обёртки)"
 				>{ "⬇ wg.conf" }</a>
@@ -104,7 +105,7 @@ templ InboundCard(s inbound.Status) {
 						class="btn-primary text-xs px-2 py-1"
 						type="button"
 						:disabled="!url.trim()"
-						@click={ "htmx.ajax('GET', '/htmx/inbound/" + s.ID + "/vkturn-link?vk_link=' + encodeURIComponent(url.trim()), '#toast')" }
+						@click={ "htmx.ajax('GET', '" + uipath.URL(ctx, "/htmx/inbound/"+s.ID+"/vkturn-link") + "?vk_link=' + encodeURIComponent(url.trim()), '#toast')" }
 					>{ "Сгенерить" }</button>
 				</div>
 				<p class="opacity-50 mt-1">
@@ -113,19 +114,19 @@ templ InboundCard(s inbound.Status) {
 			</details>
 		} else {
 			<div class="flex items-center justify-center bg-white rounded p-2">
-				<img src={ "/api/inbounds/" + s.ID + "/qr.png" } alt="QR" class="max-w-[180px] aspect-square"/>
+				<img src={ uipath.URL(ctx, "/api/inbounds/"+s.ID+"/qr.png") } alt="QR" class="max-w-[180px] aspect-square"/>
 			</div>
 			<div class="flex flex-wrap gap-1.5 mt-1">
 				<button
 					class="btn-primary text-xs px-2 py-1"
-					hx-get={ "/htmx/inbound/" + s.ID + "/connstr" }
+					hx-get={ uipath.URL(ctx, "/htmx/inbound/"+s.ID+"/connstr") }
 					hx-target="#toast"
 					hx-swap="innerHTML"
 					title="Скопировать connection string"
 				>{ "📋 connection" }</button>
 				<a
 					class="btn-ghost text-xs px-2 py-1"
-					href={ templ.SafeURL("/api/inbounds/" + s.ID + "/client.conf") }
+					href={ templ.SafeURL(uipath.URL(ctx, "/api/inbounds/"+s.ID+"/client.conf")) }
 					download
 				>{ "⬇ wg.conf" }</a>
 			</div>

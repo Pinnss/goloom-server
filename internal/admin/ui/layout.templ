@@ -7,6 +7,8 @@
 // templ children mechanism.
 package ui
 
+import "github.com/Pinnss/goloom-server/internal/admin/uipath"
+
 // Layout is the global page shell. `bodyClass` is appended onto <body>
 // so individual pages (e.g. login) can opt into a centred layout.
 //
@@ -20,11 +22,11 @@ templ Layout(title, bodyClass string) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title }</title>
-			<link rel="stylesheet" href="/static/tailwind.css"/>
+			<link rel="stylesheet" href={ uipath.URL(ctx, "/static/tailwind.css") }/>
 			<link rel="icon" href="data:,"/>
-			<script src="/static/htmx.min.js"></script>
-			<script src="/static/htmx-sse.js"></script>
-			<script defer src="/static/alpine.min.js"></script>
+			<script src={ uipath.URL(ctx, "/static/htmx.min.js") }></script>
+			<script src={ uipath.URL(ctx, "/static/htmx-sse.js") }></script>
+			<script defer src={ uipath.URL(ctx, "/static/alpine.min.js") }></script>
 		</head>
 		<body
 			x-data

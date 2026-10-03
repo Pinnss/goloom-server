@@ -4,6 +4,7 @@ import (
 	"github.com/Pinnss/goloom-server/internal/admin/ui"
 	"github.com/Pinnss/goloom-server/internal/admin/ui/components"
 	"github.com/Pinnss/goloom-server/internal/inbound"
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 )
 
 // DashboardData bundles everything the dashboard page needs in a single
@@ -17,6 +18,9 @@ type DashboardData struct {
 // Dashboard renders the main control surface — list of inbounds with
 // live status (HTMX SSE), a header bar with account dropdown, and
 // the WG-interface table at the bottom.
+// The logout redirect is RELATIVE: "login" resolves against / as /login and
+// against /prefix/ as /prefix/login, so it works under any base path without
+// the prefix being interpolated into the script attribute.
 templ Dashboard(d DashboardData) {
 	@ui.Layout("goloom admin", "") {
 		@components.ModalsStore()
@@ -36,8 +40,8 @@ templ Dashboard(d DashboardData) {
 					>{ "⚙ Аккаунт" }</button>
 					<button
 						class="btn-ghost"
-						hx-post="/logout"
-						hx-on::after-request="location='/login'"
+						hx-post={ uipath.URL(ctx, "/logout") }
+						hx-on::after-request="location='login'"
 					>{ "Выйти" }</button>
 				</div>
 			</header>
@@ -57,7 +61,7 @@ templ Dashboard(d DashboardData) {
 				<button class="btn-primary" @click="$store.modals.inbound = true">+ Создать inbound</button>
 				<button
 					class="btn-ghost"
-					hx-get="/htmx/inbounds"
+					hx-get={ uipath.URL(ctx, "/htmx/inbounds") }
 					hx-target="#inbound-card-list"
 					hx-swap="outerHTML"
 				>Обновить</button>
@@ -65,7 +69,7 @@ templ Dashboard(d DashboardData) {
 
 			// SSE wrapper — htmx-sse extension pushes a fresh card list
 			// every second from /htmx/inbounds/stream.
-			<div hx-ext="sse" sse-connect="/htmx/inbounds/stream">
+			<div hx-ext="sse" sse-connect={ uipath.URL(ctx, "/htmx/inbounds/stream") }>
 				<div sse-swap="inbounds" hx-swap="outerHTML">
 					@components.InboundCardList(d.Inbounds)
 				</div>
@@ -78,7 +82,7 @@ templ Dashboard(d DashboardData) {
 				<div
 					id="wg-list"
 					class="mt-2"
-					hx-get="/htmx/wg-interfaces"
+					hx-get={ uipath.URL(ctx, "/htmx/wg-interfaces") }
 					hx-trigger="load, every 5s"
 					hx-swap="innerHTML"
 				></div>
@@ -96,8 +100,7 @@ templ accountModal() {
 	@components.Modal("account", "Сменить пароль") {
 		<form
 			class="flex flex-col gap-3"
-			hx-post="/api/admin/password"
-			hx-ext="json-enc"
+			hx-post={ uipath.URL(ctx, "/api/admin/password") }
 			hx-on::after-request="if (event.detail.successful) { $store.modals.account = false; location.reload(); }"
 		>
 			<div>
@@ -122,7 +125,7 @@ templ accountModal() {
 
 templ inboundModal() {
 	@components.Modal("inbound", "Новый inbound") {
-		<div hx-get="/htmx/inbound/new" hx-trigger="load" hx-swap="innerHTML">
+		<div hx-get={ uipath.URL(ctx, "/htmx/inbound/new") } hx-trigger="load" hx-swap="innerHTML">
 			<div class="text-muted text-sm">Загрузка формы…</div>
 		</div>
 	}
@@ -137,7 +140,7 @@ templ inboundModal() {
 // uncluttered for the common case.
 templ captchaBadge() {
 	<div
-		x-data={ "{ pending: [], open: false, async refresh() { try { const r = await fetch('/api/captcha/pending'); if (r.ok) this.pending = await r.json() || []; } catch(e) {} } }" }
+		x-data={ "{ pending: [], open: false, async refresh() { try { const r = await fetch('" + uipath.URL(ctx, "/api/captcha/pending") + "'); if (r.ok) this.pending = await r.json() || []; } catch(e) {} } }" }
 		x-init="refresh(); setInterval(()=>refresh(), 3000)"
 		x-show="pending.length > 0"
 		x-cloak

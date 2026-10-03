@@ -10,6 +10,7 @@ import templruntime "github.com/a-h/templ/runtime"
 
 import (
 	"github.com/Pinnss/goloom-server/internal/admin/ui"
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 )
 
 // Settings is a standalone change-password page (the dashboard already
@@ -56,13 +57,39 @@ func Settings(username string) templ.Component {
 			var templ_7745c5c3_Var3 string
 			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(username)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/settings.templ`, Line: 16, Col: 98}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/settings.templ`, Line: 17, Col: 98}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</span></p></header><form class=\"card flex flex-col gap-3\" hx-post=\"/api/admin/password\" hx-ext=\"json-enc\" hx-target=\"#settings-msg\" hx-swap=\"innerHTML\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (8+ символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div id=\"settings-msg\" class=\"text-xs min-h-[1em]\"></div><div class=\"flex gap-2\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <a class=\"btn-ghost\" href=\"/\">Назад</a></div></form></main>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</span></p></header><form class=\"card flex flex-col gap-3\" hx-post=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var4 string
+			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/api/admin/password"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/settings.templ`, Line: 21, Col: 52}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\" hx-target=\"#settings-msg\" hx-swap=\"innerHTML\"><div><label class=\"field-label\">Текущий пароль</label> <input class=\"field-input\" name=\"current\" type=\"password\" autocomplete=\"current-password\"></div><div><label class=\"field-label\">Новый пароль (8+ символов)</label> <input class=\"field-input\" name=\"new\" type=\"password\" autocomplete=\"new-password\"></div><div id=\"settings-msg\" class=\"text-xs min-h-[1em]\"></div><div class=\"flex gap-2\"><button class=\"btn-primary\" type=\"submit\">Сменить</button> <a class=\"btn-ghost\" href=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var5 templ.SafeURL
+			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinURLErrs(uipath.URL(ctx, "/"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/settings.templ`, Line: 36, Col: 53}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "\">Назад</a></div></form></main>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

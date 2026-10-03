@@ -11,12 +11,17 @@ import templruntime "github.com/a-h/templ/runtime"
 import (
 	"github.com/Pinnss/goloom-server/internal/admin/ui"
 	"github.com/Pinnss/goloom-server/internal/admin/ui/components"
+	"github.com/Pinnss/goloom-server/internal/admin/uipath"
 )
 
 // Login is the standalone unauthenticated page. We deliberately keep
 // the credentials form HTMX-driven (hx-post + hx-on::after-request)
 // rather than full reload so the failure path can flash an inline
 // error without bouncing the user.
+// The post-login redirect is RELATIVE on purpose: "." resolves against this
+// page, so /login lands on / and /prefix/login lands on /prefix/. templ
+// compiles hx-on:: as a script, so the base path cannot be interpolated there
+// — and with a relative target it does not need to be.
 func Login(errMsg string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -58,22 +63,35 @@ func Login(errMsg string) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</div><form class=\"card flex flex-col gap-3\" hx-post=\"/login\" hx-swap=\"innerHTML\" hx-target=\"#login-error\" hx-on::after-request=\"if (event.detail.successful) location.href='/'\"><h1 class=\"text-base font-semibold\">goloom admin</h1><div><label class=\"field-label\">Логин</label> <input class=\"field-input\" name=\"username\" value=\"admin\" autocomplete=\"username\" autofocus></div><div><label class=\"field-label\">Пароль</label> <input class=\"field-input\" type=\"password\" name=\"password\" autocomplete=\"current-password\"></div><div id=\"login-error\" class=\"text-danger text-xs min-h-[1em]\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</div><form class=\"card flex flex-col gap-3\" hx-post=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var3 string
+			templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(uipath.URL(ctx, "/login"))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/login.templ`, Line: 25, Col: 39}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "\" hx-swap=\"innerHTML\" hx-target=\"#login-error\" hx-on::after-request=\"if (event.detail.successful) location.href='.'\"><h1 class=\"text-base font-semibold\">goloom admin</h1><div><label class=\"field-label\">Логин</label> <input class=\"field-input\" name=\"username\" value=\"admin\" autocomplete=\"username\" autofocus></div><div><label class=\"field-label\">Пароль</label> <input class=\"field-input\" type=\"password\" name=\"password\" autocomplete=\"current-password\"></div><div id=\"login-error\" class=\"text-danger text-xs min-h-[1em]\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if errMsg != "" {
-				var templ_7745c5c3_Var3 string
-				templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(errMsg)
+				var templ_7745c5c3_Var4 string
+				templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(errMsg)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/login.templ`, Line: 47, Col: 14}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/login.templ`, Line: 52, Col: 14}
 				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</div><button class=\"btn-primary\" type=\"submit\">Войти</button></form></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div><button class=\"btn-primary\" type=\"submit\">Войти</button></form></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -107,25 +125,25 @@ func LoginError(msg string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var4 == nil {
-			templ_7745c5c3_Var4 = templ.NopComponent
+		templ_7745c5c3_Var5 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var5 == nil {
+			templ_7745c5c3_Var5 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<span>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<span>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var5 string
-		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(msg)
+		var templ_7745c5c3_Var6 string
+		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(msg)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/login.templ`, Line: 61, Col: 12}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/admin/ui/pages/login.templ`, Line: 66, Col: 12}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</span>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</span>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

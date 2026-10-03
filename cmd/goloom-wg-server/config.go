@@ -11,10 +11,10 @@ import (
 )
 
 type Config struct {
-	Admin    AdminConfig     `yaml:"admin"`
-	Network  NetworkConfig   `yaml:"network"`
-	Inbounds []inbound.Spec  `yaml:"inbounds"`
-	LogLevel string          `yaml:"log_level"`
+	Admin    AdminConfig    `yaml:"admin"`
+	Network  NetworkConfig  `yaml:"network"`
+	Inbounds []inbound.Spec `yaml:"inbounds"`
+	LogLevel string         `yaml:"log_level"`
 
 	path string
 	mu   sync.Mutex
@@ -22,6 +22,13 @@ type Config struct {
 
 type AdminConfig struct {
 	Listen string `yaml:"listen"`
+
+	// BasePath mounts the whole panel under a URL prefix, e.g. "/xK9f2mQ",
+	// so a reverse proxy can expose it on a shared vhost behind an
+	// unguessable path instead of a subdomain — a subdomain needs a DNS
+	// record and a certificate naming it, and both announce that something
+	// is there. Empty keeps the panel at the root.
+	BasePath string `yaml:"base_path,omitempty"`
 
 	// PublicURL — внешний URL admin-сервера для клиентских ctrl-ws
 	// подключений (S2/S3). Используется при генерации connstr'а.
@@ -44,9 +51,9 @@ type AdminConfig struct {
 }
 
 type TLSConfig struct {
-	Cert            string `yaml:"cert"`
-	Key             string `yaml:"key"`
-	AutoSelfSigned  bool   `yaml:"auto_self_signed"`
+	Cert           string `yaml:"cert"`
+	Key            string `yaml:"key"`
+	AutoSelfSigned bool   `yaml:"auto_self_signed"`
 }
 
 type NetworkConfig struct {
