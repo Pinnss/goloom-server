@@ -209,3 +209,62 @@ func TestLegacyClientReceivesDownlink(t *testing.T) {
 	}
 	t.Fatal("the reply never reached the legacy client — its tunnel would be one-way")
 }
+
+// Ten hello-less conns must land in TEN groups, not one. The group id for such
+// a client is minted per connection, so sharing one would mean two unrelated
+// clients feeding the same socket to WireGuard — their traffic crossing, which
+// is a correctness and privacy failure, not just a throughput quirk.
+func TestLegacyClientsDoNotShareAGroup(t *testing.T) {
+	wg, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer wg.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := &listener{
+		cfg:    relay.Config{ConnectAddr: wg.LocalAddr().String()},
+		log:    log.New(&bytes.Buffer{}, "", 0),
+		ctx:    ctx,
+		groups: newGroupRegistry(),
+	}
+
+	const n = 10
+	conns := make([]*scriptedSRTPConn, n)
+	done := make(chan struct{}, n)
+	for i := range conns {
+		conns[i] = newScriptedSRTPConn([]byte{byte(i), 0x10, 0x20})
+		c := conns[i]
+		go func() { defer func() { done <- struct{}{} }(); l.forwardUDP(c) }()
+	}
+
+	// Wait for every uplink to arrive, so every conn has joined something.
+	_ = wg.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 1500)
+	for i := 0; i < n; i++ {
+		if _, _, err := wg.ReadFrom(buf); err != nil {
+			t.Fatalf("only %d of %d uplinks arrived: %v", i, n, err)
+		}
+	}
+
+	l.groups.mu.Lock()
+	got := len(l.groups.groups)
+	l.groups.mu.Unlock()
+	if got != n {
+		t.Errorf("%d hello-less conns produced %d groups, want %d — "+
+			"unrelated clients would be sharing one socket to WireGuard", n, got, n)
+	}
+
+	cancel()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a session did not exit")
+		}
+	}
+}
